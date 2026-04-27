@@ -5,29 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1777259540957,
-      "tag": "0000_early_ares",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1777260410757,
-      "tag": "0001_fast_glorian",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1777261792919,
-      "tag": "0002_bumpy_selene",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1777264062226,
-      "tag": "0003_special_morph",
+      "when": 1777279832847,
+      "tag": "0000_next_nightcrawler",
       "breakpoints": true
     }
   ]

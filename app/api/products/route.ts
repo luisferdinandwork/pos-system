@@ -1,45 +1,103 @@
 // app/api/products/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { getAllProducts, createProduct, updateProduct, deleteProduct } from "@/lib/products";
+import { db } from "@/lib/db";
+import { eventItems, events } from "@/lib/db/schema";
+import { eq, ilike, or, sql } from "drizzle-orm";
 
-export async function GET() {
-  return NextResponse.json(await getAllProducts());
-}
-
-export async function POST(req: NextRequest) {
-  const b = await req.json();
-  const product = await createProduct({
-    itemId: b.itemId,
-    baseItemNo: b.baseItemNo || null,
-    name: b.name,
-    color: b.color || null,
-    variantCode: b.variantCode || null,
-    unit: b.unit || "PCS",
-    price: String(b.price),
-    originalPrice: b.originalPrice ? String(b.originalPrice) : null,
-    stock: Number(b.stock),
-  });
-  return NextResponse.json(product, { status: 201 });
-}
-
-export async function PUT(req: NextRequest) {
-  const b = await req.json();
-  const updated = await updateProduct(b.id, {
-    itemId: b.itemId,
-    baseItemNo: b.baseItemNo || null,
-    name: b.name,
-    color: b.color || null,
-    variantCode: b.variantCode || null,
-    unit: b.unit || "PCS",
-    price: String(b.price),
-    originalPrice: b.originalPrice ? String(b.originalPrice) : null,
-    stock: Number(b.stock),
-  });
-  return NextResponse.json(updated);
-}
-
-export async function DELETE(req: NextRequest) {
+// ── GET /api/products ─────────────────────────────────────────────────────────
+// Returns a deduplicated list of products (by itemId) with the events they
+// appear in. Supports ?q= for search and ?itemId= for exact lookup.
+export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  await deleteProduct(Number(searchParams.get("id")));
-  return NextResponse.json({ success: true });
+  const q      = searchParams.get("q")      ?? "";
+  const itemId = searchParams.get("itemId") ?? "";
+
+  // Build the base join: event_items ← events
+  const rows = await db
+    .select({
+      // Item identity
+      eventItemId: eventItems.id,
+      itemId:      eventItems.itemId,
+      baseItemNo:  eventItems.baseItemNo,
+      name:        eventItems.name,
+      color:       eventItems.color,
+      variantCode: eventItems.variantCode,
+      unit:        eventItems.unit,
+      // Per-event prices and stock
+      netPrice:    eventItems.netPrice,
+      retailPrice: eventItems.retailPrice,
+      stock:       eventItems.stock,
+      createdAt:   eventItems.createdAt,
+      // Event info
+      eventId:     events.id,
+      eventName:   events.name,
+      eventStatus: events.status,
+      eventLocation: events.location,
+    })
+    .from(eventItems)
+    .innerJoin(events, eq(events.id, eventItems.eventId))
+    .where(
+      itemId
+        ? eq(eventItems.itemId, itemId)
+        : q
+          ? or(
+              ilike(eventItems.itemId,     `%${q}%`),
+              ilike(eventItems.name,       `%${q}%`),
+              ilike(eventItems.baseItemNo, `%${q}%`)
+            )
+          : undefined
+    )
+    .orderBy(eventItems.name, eventItems.itemId);
+
+  // Group by itemId so callers can see all events a product code appears in
+  const grouped = new Map<
+    string,
+    {
+      itemId:      string;
+      baseItemNo:  string | null;
+      name:        string;
+      color:       string | null;
+      variantCode: string | null;
+      unit:        string | null;
+      events: {
+        eventItemId: number;
+        eventId:     number;
+        eventName:   string;
+        eventStatus: string;
+        eventLocation: string | null;
+        netPrice:    string;
+        retailPrice: string;
+        stock:       number;
+        createdAt:   Date | null;
+      }[];
+    }
+  >();
+
+  for (const row of rows) {
+    const key = row.itemId;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        itemId:      row.itemId,
+        baseItemNo:  row.baseItemNo,
+        name:        row.name,
+        color:       row.color,
+        variantCode: row.variantCode,
+        unit:        row.unit,
+        events:      [],
+      });
+    }
+    grouped.get(key)!.events.push({
+      eventItemId:   row.eventItemId,
+      eventId:       row.eventId,
+      eventName:     row.eventName,
+      eventStatus:   row.eventStatus,
+      eventLocation: row.eventLocation,
+      netPrice:      row.netPrice,
+      retailPrice:   row.retailPrice,
+      stock:         row.stock,
+      createdAt:     row.createdAt,
+    });
+  }
+
+  return NextResponse.json(Array.from(grouped.values()));
 }

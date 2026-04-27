@@ -9,8 +9,10 @@
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx lib/db/migrate.ts",
+    "db:studio": "drizzle-kit studio",
     "db:seed": "tsx lib/db/seed.ts",
-    "db:seed-payments": "tsx lib/db/seed-payments.ts"
+    "db:seed-payments": "tsx lib/db/seed-payments.ts",
+    "db:reset": "tsx lib/db/reset.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

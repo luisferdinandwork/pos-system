@@ -1,305 +1,390 @@
 // app/products/page.tsx
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { Plus, Upload, Download, Pencil, Trash2, Search } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Search, ChevronDown, ChevronUp, Package2,
+  CalendarDays, TrendingUp, AlertTriangle, ExternalLink,
+} from "lucide-react";
+import Link from "next/link";
 import { formatRupiah } from "@/lib/utils";
 
-type Product = {
-  id: number;
-  itemId: string;
-  baseItemNo: string | null;
-  name: string;
-  color: string | null;
-  variantCode: string | null;
-  unit: string | null;
-  price: string | number;
-  originalPrice: string | number | null;
-  stock: number;
+// ── Types matching the new GET /api/products response ────────────────────────
+type EventAppearance = {
+  eventItemId:   number;
+  eventId:       number;
+  eventName:     string;
+  eventStatus:   string;
+  eventLocation: string | null;
+  netPrice:      string;
+  retailPrice:   string;
+  stock:         number;
+  createdAt:     string | null;
 };
 
-type FormState = Omit<Product, "id"> & { id?: number };
+type ProductGroup = {
+  itemId:      string;
+  baseItemNo:  string | null;
+  name:        string;
+  color:       string | null;
+  variantCode: string | null;
+  unit:        string | null;
+  events:      EventAppearance[];
+};
 
-const emptyForm = (): FormState => ({
-  itemId: "", baseItemNo: "", name: "", color: "", variantCode: "",
-  unit: "PCS", price: "", originalPrice: "", stock: 0,
-});
+// ── Status badge ──────────────────────────────────────────────────────────────
+const STATUS_STYLE: Record<string, { color: string; bg: string; dot: string }> = {
+  active: { color: "#16a34a", bg: "rgba(22,163,74,0.1)",   dot: "#16a34a" },
+  draft:  { color: "#6b7280", bg: "rgba(107,114,128,0.1)", dot: "#9ca3af" },
+  closed: { color: "#dc2626", bg: "rgba(220,38,38,0.1)",   dot: "#dc2626" },
+};
 
-export default function ProductsPage() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [search, setSearch] = useState("");
-  const [form, setForm] = useState<FormState>(emptyForm());
-  const [showForm, setShowForm] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{ inserted: number; updated: number; errors: string[] } | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  const filtered = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      p.itemId.toLowerCase().includes(search.toLowerCase()) ||
-      (p.baseItemNo ?? "").toLowerCase().includes(search.toLowerCase())
+function StatusDot({ status }: { status: string }) {
+  const s = STATUS_STYLE[status] ?? STATUS_STYLE.draft;
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold"
+      style={{ background: s.bg, color: s.color }}
+    >
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: s.dot }} />
+      {status.charAt(0).toUpperCase() + status.slice(1)}
+    </span>
   );
+}
 
-  async function load() {
-    const res = await fetch("/api/products");
-    setProducts(await res.json());
-  }
-  useEffect(() => { load(); }, []);
+// ── Expandable product row ────────────────────────────────────────────────────
+function ProductRow({ group }: { group: ProductGroup }) {
+  const [open, setOpen] = useState(false);
 
-  function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
-    setForm({ ...form, [e.target.name]: e.target.value });
-  }
+  const totalStock    = group.events.reduce((s, e) => s + e.stock, 0);
+  const activeEvents  = group.events.filter((e) => e.eventStatus === "active");
+  const hasLowStock   = group.events.some((e) => e.stock <= 5 && e.eventStatus === "active");
 
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    const method = form.id ? "PUT" : "POST";
-    await fetch("/api/products", {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    setShowForm(false);
-    setForm(emptyForm());
-    load();
-  }
+  // Price range across events
+  const prices = group.events.map((e) => parseFloat(e.netPrice));
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceLabel = minPrice === maxPrice
+    ? formatRupiah(minPrice)
+    : `${formatRupiah(minPrice)} – ${formatRupiah(maxPrice)}`;
 
-  async function handleDelete(id: number) {
-    if (!confirm("Delete this product?")) return;
-    await fetch(`/api/products?id=${id}`, { method: "DELETE" });
-    load();
-  }
-
-  async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImporting(true);
-    setImportResult(null);
-    const fd = new FormData();
-    fd.append("file", file);
-    const res = await fetch("/api/import/products", { method: "POST", body: fd });
-    const result = await res.json();
-    setImportResult(result);
-    setImporting(false);
-    load();
-    e.target.value = "";
-  }
-
-  const inputCls = "w-full rounded-lg border px-3 py-2 text-sm bg-transparent focus:outline-none focus:ring-1 transition-colors";
-  const inputStyle = { borderColor: "var(--border)", color: "var(--foreground)" };
+  const cs = { background: "var(--card)", borderColor: "var(--border)" };
 
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Products</h1>
-          <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-            {products.length} items in catalog
+    <div className="rounded-2xl border overflow-hidden transition-all" style={cs}>
+      {/* ── Main row ── */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-4 px-5 py-4 text-left hover:bg-black/[0.03] transition-colors"
+      >
+        {/* Icon */}
+        <div
+          className="w-10 h-10 rounded-xl flex items-center justify-center text-sm font-black flex-shrink-0"
+          style={{ background: "var(--muted)", color: "var(--brand-orange)" }}
+        >
+          {group.name.slice(0, 2).toUpperCase()}
+        </div>
+
+        {/* Identity */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="font-bold text-sm truncate" style={{ color: "var(--foreground)" }}>
+              {group.name}
+            </p>
+            {group.variantCode && (
+              <span
+                className="text-xs px-2 py-0.5 rounded font-medium flex-shrink-0"
+                style={{ background: "var(--secondary)", color: "var(--secondary-foreground)" }}
+              >
+                {group.variantCode}
+              </span>
+            )}
+            {group.color && (
+              <span className="text-xs flex-shrink-0" style={{ color: "var(--muted-foreground)" }}>
+                {group.color}
+              </span>
+            )}
+          </div>
+          <p className="font-mono text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+            {group.itemId}
+            {group.baseItemNo && group.baseItemNo !== group.itemId && (
+              <span className="ml-2 opacity-60">· {group.baseItemNo}</span>
+            )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={handleImport} />
-          <button
-            onClick={() => fileRef.current?.click()}
-            disabled={importing}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-all"
-            style={{ borderColor: "var(--brand-mid)", color: "var(--foreground)", background: "var(--secondary)" }}
-          >
-            <Upload size={14} />
-            {importing ? "Importing…" : "Import Excel"}
-          </button>
-          <a
-            href="/api/export/products"
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-all"
-            style={{ borderColor: "var(--brand-mid)", color: "var(--foreground)", background: "var(--secondary)" }}
-          >
-            <Download size={14} />
-            Export Excel
-          </a>
-          <button
-            onClick={() => { setForm(emptyForm()); setShowForm(true); }}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all"
-            style={{ background: "var(--brand-orange)", color: "white" }}
-          >
-            <Plus size={14} />
-            Add Product
-          </button>
-        </div>
-      </div>
 
-      {/* Import result banner */}
-      {importResult && (
-        <div
-          className="rounded-lg p-4 text-sm border"
-          style={{
-            background: importResult.errors.length > 0 ? "rgba(224,58,58,0.1)" : "rgba(255,101,63,0.1)",
-            borderColor: importResult.errors.length > 0 ? "rgba(224,58,58,0.3)" : "var(--brand-orange)",
-            color: "var(--foreground)",
-          }}
-        >
-          ✅ Import complete — <strong>{importResult.inserted}</strong> inserted, <strong>{importResult.updated}</strong> updated.
-          {importResult.errors.length > 0 && (
-            <span className="ml-2 text-red-400">{importResult.errors.length} errors.</span>
-          )}
-          <button onClick={() => setImportResult(null)} className="ml-3 underline text-xs opacity-60">Dismiss</button>
-        </div>
-      )}
+        {/* Stats */}
+        <div className="hidden sm:flex items-center gap-6 flex-shrink-0">
+          {/* Price range */}
+          <div className="text-right">
+            <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>Net Price</p>
+            <p className="text-sm font-bold" style={{ color: "var(--brand-orange)" }}>
+              {priceLabel}
+            </p>
+          </div>
 
-      {/* Product form modal */}
-      {showForm && (
+          {/* Total stock */}
+          <div className="text-right">
+            <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>Total Stock</p>
+            <div className="flex items-center justify-end gap-1">
+              {hasLowStock && <AlertTriangle size={12} style={{ color: "#f59e0b" }} />}
+              <p
+                className="text-sm font-bold"
+                style={{ color: hasLowStock ? "#f59e0b" : "var(--foreground)" }}
+              >
+                {totalStock}
+              </p>
+            </div>
+          </div>
+
+          {/* Events */}
+          <div className="text-right">
+            <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>Events</p>
+            <p className="text-sm font-bold" style={{ color: "var(--foreground)" }}>
+              {group.events.length}
+              {activeEvents.length > 0 && (
+                <span className="ml-1 text-xs font-medium" style={{ color: "#16a34a" }}>
+                  ({activeEvents.length} active)
+                </span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        {/* Expand chevron */}
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          style={{ background: "rgba(10,5,30,0.8)" }}
+          className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ background: "var(--muted)", color: "var(--muted-foreground)" }}
         >
-          <div
-            className="rounded-xl border p-6 w-full max-w-lg shadow-2xl"
-            style={{ background: "var(--card)", borderColor: "var(--border)" }}
-          >
-            <h2 className="font-semibold text-white mb-5 text-lg">
-              {form.id ? "Edit Product" : "New Product"}
-            </h2>
-            <form onSubmit={handleSave} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Reference No. (Item ID) *</label>
-                  <input name="itemId" value={form.itemId} onChange={handleChange} required className={inputCls} style={inputStyle} />
+          {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </div>
+      </button>
+
+      {/* ── Expanded: event appearances ── */}
+      {open && (
+        <div
+          className="border-t"
+          style={{ borderColor: "var(--border)", background: "var(--muted)" }}
+        >
+          <div className="px-5 py-3">
+            <p
+              className="text-xs font-semibold uppercase tracking-wider mb-3"
+              style={{ color: "var(--muted-foreground)" }}
+            >
+              Appears in {group.events.length} event{group.events.length !== 1 ? "s" : ""}
+            </p>
+            <div className="space-y-2">
+              {group.events.map((ev) => (
+                <div
+                  key={ev.eventItemId}
+                  className="flex items-center gap-3 rounded-xl p-3"
+                  style={{ background: "var(--card)", border: "1px solid var(--border)" }}
+                >
+                  <CalendarDays size={14} className="flex-shrink-0"
+                    style={{ color: "var(--muted-foreground)" }} />
+
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold truncate"
+                      style={{ color: "var(--foreground)" }}>
+                      {ev.eventName}
+                    </p>
+                    {ev.eventLocation && (
+                      <p className="text-xs truncate" style={{ color: "var(--muted-foreground)" }}>
+                        {ev.eventLocation}
+                      </p>
+                    )}
+                  </div>
+
+                  <StatusDot status={ev.eventStatus} />
+
+                  <div className="text-right flex-shrink-0">
+                    <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>Net</p>
+                    <p className="text-sm font-bold" style={{ color: "var(--brand-orange)" }}>
+                      {formatRupiah(ev.netPrice)}
+                    </p>
+                  </div>
+
+                  <div className="text-right flex-shrink-0">
+                    <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>Stock</p>
+                    <p
+                      className="text-sm font-bold"
+                      style={{
+                        color: ev.stock <= 0 ? "#ef4444" : ev.stock <= 5 ? "#f59e0b" : "var(--foreground)",
+                      }}
+                    >
+                      {ev.stock}
+                    </p>
+                  </div>
+
+                  <Link
+                    href={`/events/${ev.eventId}`}
+                    className="flex-shrink-0 p-1.5 rounded-lg transition-all"
+                    style={{ background: "var(--muted)", color: "var(--muted-foreground)" }}
+                    title="Go to event"
+                  >
+                    <ExternalLink size={13} />
+                  </Link>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Base Item No.</label>
-                  <input name="baseItemNo" value={form.baseItemNo ?? ""} onChange={handleChange} className={inputCls} style={inputStyle} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Description (Name) *</label>
-                <input name="name" value={form.name} onChange={handleChange} required className={inputCls} style={inputStyle} />
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Description 2 (Color)</label>
-                <input name="color" value={form.color ?? ""} onChange={handleChange} className={inputCls} style={inputStyle} />
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Variant / Size</label>
-                  <input name="variantCode" value={form.variantCode ?? ""} onChange={handleChange} className={inputCls} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Unit</label>
-                  <select name="unit" value={form.unit ?? "PCS"} onChange={handleChange} className={inputCls} style={{ ...inputStyle, background: "var(--card)" }}>
-                    <option value="PCS">PCS</option>
-                    <option value="PRS">PRS</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Stock</label>
-                  <input name="stock" type="number" min="0" value={form.stock} onChange={handleChange} required className={inputCls} style={inputStyle} />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Bazar Price (Rp) *</label>
-                  <input name="price" type="number" min="0" value={form.price} onChange={handleChange} required className={inputCls} style={inputStyle} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1" style={{ color: "var(--muted-foreground)" }}>Original Price (Rp)</label>
-                  <input name="originalPrice" type="number" min="0" value={form.originalPrice ?? ""} onChange={handleChange} className={inputCls} style={inputStyle} />
-                </div>
-              </div>
-              <div className="flex gap-2 pt-2">
-                <button type="submit" className="flex-1 rounded-lg py-2 text-sm font-semibold transition-all" style={{ background: "var(--brand-orange)", color: "white" }}>
-                  Save Product
-                </button>
-                <button type="button" onClick={() => setShowForm(false)} className="px-4 rounded-lg text-sm border transition-all" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
-                  Cancel
-                </button>
-              </div>
-            </form>
+              ))}
+            </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* Search */}
-      <div className="relative">
-        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--muted-foreground)" }} />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name, item ID, or base item no..."
-          className="w-full rounded-lg border pl-9 pr-4 py-2.5 text-sm bg-transparent focus:outline-none focus:ring-1 transition-colors"
-          style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
-        />
-      </div>
+// ── Page ──────────────────────────────────────────────────────────────────────
+export default function ProductsPage() {
+  const [groups,  setGroups]  = useState<ProductGroup[]>([]);
+  const [search,  setSearch]  = useState("");
+  const [loading, setLoading] = useState(true);
+  const [filter,  setFilter]  = useState<"all" | "active" | "low-stock">("all");
 
-      {/* Table */}
-      <div className="rounded-xl border overflow-hidden" style={{ background: "var(--card)", borderColor: "var(--border)" }}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--muted)" }}>
-                {["Reference No.", "Base Item", "Description", "Color", "Size", "Unit", "Bazar Price", "Original", "Stock", ""].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={10} className="px-4 py-10 text-center text-sm" style={{ color: "var(--muted-foreground)" }}>
-                    No products found.
-                  </td>
-                </tr>
-              ) : filtered.map((p, i) => (
-                <tr
-                  key={p.id}
-                  style={{ borderBottom: i < filtered.length - 1 ? "1px solid var(--border)" : "none" }}
-                  className="transition-colors hover:bg-white/5"
-                >
-                  <td className="px-4 py-3 font-mono text-xs" style={{ color: "var(--muted-foreground)" }}>{p.itemId}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: "var(--muted-foreground)" }}>{p.baseItemNo ?? "-"}</td>
-                  <td className="px-4 py-3 font-medium text-white">{p.name}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: "var(--muted-foreground)" }}>{p.color ?? "-"}</td>
-                  <td className="px-4 py-3">
-                    {p.variantCode ? (
-                      <span className="px-2 py-0.5 rounded text-xs font-medium" style={{ background: "var(--secondary)", color: "var(--secondary-foreground)" }}>
-                        {p.variantCode}
-                      </span>
-                    ) : "-"}
-                  </td>
-                  <td className="px-4 py-3 text-xs" style={{ color: "var(--muted-foreground)" }}>{p.unit}</td>
-                  <td className="px-4 py-3 font-semibold" style={{ color: "var(--brand-orange)" }}>{formatRupiah(p.price)}</td>
-                  <td className="px-4 py-3 text-xs line-through" style={{ color: "var(--muted-foreground)" }}>
-                    {p.originalPrice ? formatRupiah(p.originalPrice) : "-"}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`font-semibold text-sm ${Number(p.stock) <= 5 ? "text-red-400" : "text-white"}`}>
-                      {p.stock}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => { setForm({ ...p, originalPrice: p.originalPrice ?? "" }); setShowForm(true); }}
-                        className="p-1.5 rounded-md transition-colors"
-                        style={{ color: "var(--brand-yellow)", background: "rgba(255,200,92,0.1)" }}
-                      >
-                        <Pencil size={13} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(p.id)}
-                        className="p-1.5 rounded-md transition-colors"
-                        style={{ color: "#e0534a", background: "rgba(224,83,74,0.1)" }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+  async function load(q = "") {
+    setLoading(true);
+    const url = q ? `/api/products?q=${encodeURIComponent(q)}` : "/api/products";
+    const res = await fetch(url);
+    setGroups(await res.json());
+    setLoading(false);
+  }
+
+  useEffect(() => { load(); }, []);
+
+  // Debounce search
+  useEffect(() => {
+    const t = setTimeout(() => load(search), 280);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Client-side filter on top of server search
+  const filtered = groups.filter((g) => {
+    if (filter === "active")
+      return g.events.some((e) => e.eventStatus === "active");
+    if (filter === "low-stock")
+      return g.events.some((e) => e.stock <= 5 && e.eventStatus === "active");
+    return true;
+  });
+
+  // Summary stats
+  const totalItems      = groups.length;
+  const inActiveEvents  = groups.filter((g) => g.events.some((e) => e.eventStatus === "active")).length;
+  const lowStockItems   = groups.filter((g) => g.events.some((e) => e.stock <= 5 && e.eventStatus === "active")).length;
+  const totalEventSlots = groups.reduce((s, g) => s + g.events.length, 0);
+
+  const cs = { background: "var(--card)", borderColor: "var(--border)" };
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ color: "var(--foreground)" }}>
+            Products
+          </h1>
+          <p className="text-sm mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+            Items are managed per-event. This view shows where each product code appears.
+          </p>
         </div>
+        <Link
+          href="/events"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
+          style={{ background: "var(--brand-orange)", color: "white" }}
+        >
+          <CalendarDays size={14} /> Manage via Events
+        </Link>
       </div>
+
+      {/* ── Stats row ──────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: "Unique SKUs",     value: totalItems,      color: "var(--foreground)" },
+          { label: "In Active Events",value: inActiveEvents,  color: "#16a34a"           },
+          { label: "Low Stock (≤5)",  value: lowStockItems,   color: lowStockItems > 0 ? "#f59e0b" : "#16a34a" },
+          { label: "Event Slots",     value: totalEventSlots, color: "var(--brand-orange)" },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="rounded-2xl border p-4" style={cs}>
+            <p className="text-2xl font-black" style={{ color }}>{value}</p>
+            <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>{label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Search + filter bar ─────────────────────────────────────────────── */}
+      <div className="flex flex-wrap gap-2">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+            style={{ color: "var(--muted-foreground)" }} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name, item ID, or base item no…"
+            className="w-full rounded-xl border pl-9 pr-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+            style={{ borderColor: "var(--border)", color: "var(--foreground)", background: "var(--card)" }}
+          />
+        </div>
+        {(["all", "active", "low-stock"] as const).map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className="px-3 py-2 rounded-xl text-xs font-semibold border transition-all"
+            style={{
+              borderColor: filter === f ? "var(--brand-orange)"      : "var(--border)",
+              background:  filter === f ? "rgba(255,101,63,0.08)"    : "transparent",
+              color:       filter === f ? "var(--brand-orange)"      : "var(--muted-foreground)",
+            }}
+          >
+            {f === "all" ? "All" : f === "active" ? "In Active Events" : "⚠ Low Stock"}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Info callout — no add/import here ─────────────────────────────── */}
+      <div
+        className="flex items-start gap-3 rounded-xl border px-4 py-3 text-sm"
+        style={{
+          borderColor: "rgba(255,101,63,0.2)",
+          background:  "rgba(255,101,63,0.04)",
+          color:       "var(--muted-foreground)",
+        }}
+      >
+        <Package2 size={16} className="flex-shrink-0 mt-0.5" style={{ color: "var(--brand-orange)" }} />
+        <span>
+          Products are created when you add items to an event. To add, edit, import, or adjust stock
+          — go to{" "}
+          <Link href="/events" className="font-semibold underline"
+            style={{ color: "var(--brand-orange)" }}>
+            Events
+          </Link>{" "}
+          and open the event you want to manage.
+        </span>
+      </div>
+
+      {/* ── Product list ──────────────────────────────────────────────────── */}
+      {loading ? (
+        <div className="rounded-2xl border py-16 text-center" style={cs}>
+          <p className="text-sm animate-pulse" style={{ color: "var(--muted-foreground)" }}>
+            Loading products…
+          </p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="rounded-2xl border py-16 text-center space-y-2" style={cs}>
+          <Package2 size={36} className="mx-auto opacity-20"
+            style={{ color: "var(--muted-foreground)" }} />
+          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+            {search ? "No products match your search." : "No products found. Add items to an event to get started."}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+            {filtered.length} product{filtered.length !== 1 ? "s" : ""} — click any row to see event details
+          </p>
+          {filtered.map((group) => (
+            <ProductRow key={group.itemId} group={group} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

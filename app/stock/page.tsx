@@ -45,33 +45,24 @@ export default function StockPage() {
   }
   useEffect(() => { load(); }, []);
 
-  async function loadHistory(productId: number) {
-    if (history[productId]) return;
-    const res = await fetch(`/api/stock?productId=${productId}`);
-    setHistory((prev) => ({ ...prev, [productId]: [] }));
-    const data = await res.json();
-    setHistory((prev) => ({ ...prev, [productId]: data }));
-  }
+async function loadHistory(eventProductId: number) {
+  if (history[eventProductId]) return;
+  const res  = await fetch(`/api/stock?eventProductId=${eventProductId}`);
+  const data = await res.json();
+  setHistory((prev) => ({ ...prev, [eventProductId]: data }));
+}
 
-  function toggleHistory(productId: number) {
-    if (expandedId === productId) {
-      setExpandedId(null);
-    } else {
-      setExpandedId(productId);
-      loadHistory(productId);
-    }
-  }
-
+  // Update handleAddStock to send eventProductId:
   async function handleAddStock(e: React.FormEvent) {
     e.preventDefault();
     if (!addForm) return;
     await fetch("/api/stock", {
-      method: "POST",
+      method:  "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        productId: addForm.productId,
-        quantity: Number(addForm.quantity),
-        note: addForm.note,
+        eventProductId: addForm.productId,   // addForm.productId holds the ep.id
+        quantity:       Number(addForm.quantity),
+        note:           addForm.note,
       }),
     });
     setAddForm(null);
@@ -81,6 +72,15 @@ export default function StockPage() {
       return next;
     });
     load();
+  }
+
+  function toggleHistory(productId: number) {
+    if (expandedId === productId) {
+      setExpandedId(null);
+    } else {
+      setExpandedId(productId);
+      loadHistory(productId);
+    }
   }
 
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
