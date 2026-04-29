@@ -1,4 +1,4 @@
-// app/events/page.tsx
+// app/(main)/events/page.tsx
 "use client";
 import { useEffect, useState } from "react";
 import { Plus, Pencil, Trash2, X, Calendar, MapPin, ArrowRight } from "lucide-react";

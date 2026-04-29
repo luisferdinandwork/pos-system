@@ -57,3 +57,24 @@ export function discountPct(retailPrice: number | string, netPrice: number | str
   if (retail <= 0 || net >= retail) return 0;
   return Math.round((1 - net / retail) * 100);
 }
+
+// Format a compact number for dashboard stats (e.g. 1.2M, 500K)
+export function formatCompact(amount: number | string | null | undefined): string {
+  if (amount === null || amount === undefined) return "0";
+  const num = typeof amount === "string" ? parseFloat(amount) : amount;
+  if (isNaN(num)) return "0";
+  if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(1)}B`;
+  if (num >= 1_000_000)     return `${(num / 1_000_000).toFixed(1)}M`;
+  if (num >= 1_000)         return `${(num / 1_000).toFixed(0)}K`;
+  return String(num);
+}
+
+// Clamp a number between min and max
+export function clamp(val: number, min: number, max: number): number {
+  return Math.min(Math.max(val, min), max);
+}
+
+// Build a URL for an event-scoped path (keeps event context clear)
+export function eventPath(eventId: number, path = ""): string {
+  return `/events/${eventId}${path ? `/${path.replace(/^\//, "")}` : ""}`;
+}

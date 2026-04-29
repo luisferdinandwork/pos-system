@@ -1,4 +1,4 @@
-// app/transactions/page.tsx
+// app/(main)/transactions/page.tsx
 import { getAllTransactions } from "@/lib/transactions";
 import { formatRupiah, formatDate } from "@/lib/utils";
 import { ArrowUpRight } from "lucide-react";

@@ -20,10 +20,10 @@ const SETUP_ITEMS = [
   { href: "/payment-methods", label: "Payment Methods", icon: Wallet          },
 ] as const;
 
-const LIVE_ITEMS = [
-  { href: "/transactions",    label: "Transactions",    icon: Receipt         },
-  { href: "/stock",           label: "Stock",           icon: Warehouse       },
-] as const;
+// const LIVE_ITEMS = [
+//   { href: "/transactions",    label: "Transactions",    icon: Receipt         },
+//   { href: "/stock",           label: "Stock",           icon: Warehouse       },
+// ] as const;
 
 function NavItem({
   href,
@@ -104,16 +104,16 @@ export default function NavLinks() {
       <div className="mx-3 my-2 h-px" style={{ background: "rgba(255,255,255,0.08)" }} />
 
       {/* ── OPERATIONS section ─────────────────────────────────────────────── */}
-      <div className="px-3 pb-0.5">
+      {/* <div className="px-3 pb-0.5">
         <p className="text-[10px] font-bold uppercase tracking-[0.14em]"
           style={{ color: "rgba(255,255,255,0.28)" }}>
           Operations
         </p>
-      </div>
+      </div> */}
 
-      {LIVE_ITEMS.map((item) => (
+      {/* {LIVE_ITEMS.map((item) => (
         <NavItem key={item.href} {...item} />
-      ))}
+      ))} */}
 
       {/* ── POS Launch — bottom of sidebar ─────────────────────────────────── */}
       {/* Placed at the bottom so it's always reachable, visually distinct */}

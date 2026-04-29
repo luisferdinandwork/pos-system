@@ -1,4 +1,4 @@
-// app/stock/page.tsx
+// app/(main)/stock/page.tsx
 "use client";
 import React, { useEffect, useRef, useState } from "react";
 import {
