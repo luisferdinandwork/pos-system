@@ -1,434 +1,465 @@
 // app/(pos)/pos/page.tsx
 "use client";
-import { useEffect, useState, useRef, Suspense } from "react";
+
+import { useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
-  ScanLine, Plus, Minus, Trash2,
-  ArrowLeft, CheckCircle2, Banknote, CreditCard,
-  QrCode, Wallet, Tag, X, ChevronRight,
-  Zap, LogOut, Package,
+  ScanLine, Plus, Minus, Trash2, ArrowLeft, CheckCircle2,
+  Banknote, CreditCard, QrCode, Wallet, Tag, X, Zap,
+  LogOut, Package, RefreshCw, Database, CloudUpload,
+  AlertCircle, Check, MapPin, Wifi, WifiOff, ArrowRight, ChevronRight,
 } from "lucide-react";
 import { formatRupiah } from "@/lib/utils";
+import { signOut } from "next-auth/react";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-type EventRow   = { id: number; name: string; status: string; location: string | null };
-type EventItem  = { id: number; stock: number; retailPrice: string; netPrice: string; itemId: string; name: string; color: string | null; variantCode: string | null; unit: string | null };
-type CartItem   = { eventItemId: number; itemId: string; productName: string; variantCode: string | null; color: string | null; quantity: number; unitPrice: number; discountAmt: number; finalPrice: number; promoApplied: string | null; freeQty: number };
-type PayMethod  = { id: number; name: string; type: string; provider: string | null };
-type PromoRes   = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
-type Screen     = "event-select" | "sell" | "payment" | "success";
+type EventRow    = { id: number; name: string; status: string; location: string | null; startDate?: string | null; endDate?: string | null };
+type EventItem   = { id: number; eventId: number; stock: number; originalStock?: number; retailPrice: string; netPrice: string; itemId: string; name: string; color: string | null; variantCode: string | null; unit: string | null };
+type CartItem    = { eventItemId: number; itemId: string; productName: string; variantCode: string | null; color: string | null; quantity: number; unitPrice: number; discountAmt: number; finalPrice: number; promoApplied: string | null; freeQty: number };
+type PayMethod   = { id: number; name: string; type: string; provider: string | null };
+type PromoRes    = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
+type LocalBundle = { event: EventRow; items: EventItem[]; promos: unknown[]; paymentMethods: PayMethod[] };
+type Screen      = "event-select" | "sell" | "payment" | "success";
 
-// ── Payment icon map ──────────────────────────────────────────────────────────
 const PAY_ICON: Record<string, React.ReactNode> = {
-  cash:    <Banknote size={16} />,
-  qris:    <QrCode size={16} />,
-  debit:   <CreditCard size={16} />,
-  credit:  <CreditCard size={16} />,
-  ewallet: <Wallet size={16} />,
+  cash: <Banknote size={16} />, qris: <QrCode size={16} />,
+  debit: <CreditCard size={16} />, credit: <CreditCard size={16} />, ewallet: <Wallet size={16} />,
 };
 const PAY_COLOR: Record<string, string> = {
   cash: "#16a34a", qris: "#7c3aed", debit: "#0369a1", credit: "#b45309", ewallet: "#be185d",
 };
+const STATUS_STYLE: Record<string, { dot: string; label: string; border: string; bg: string }> = {
+  active: { dot: "#16a34a", label: "Live",   border: "rgba(22,163,74,0.3)",   bg: "rgba(22,163,74,0.06)"  },
+  draft:  { dot: "#f59e0b", label: "Draft",  border: "rgba(245,158,11,0.25)", bg: "rgba(245,158,11,0.05)" },
+  closed: { dot: "#dc2626", label: "Closed", border: "rgba(220,38,38,0.2)",   bg: "rgba(220,38,38,0.04)"  },
+};
 
-function mono(n: number | string) { return formatRupiah(n); }
+function money(v: number | string) { return formatRupiah(v); }
+function makeClientTxnId(eventId: number) {
+  const r = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `LOCAL-EV${eventId}-${r}`;
+}
 
-// ── Inner component (uses useSearchParams, must be wrapped in Suspense) ───────
+const KEYFRAMES = `
+@keyframes fadeUp   { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
+@keyframes pulseDot { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+.anim-fade-up       { animation: fadeUp .35s ease both }
+`;
+
 function POSInner() {
-  const searchParams = useSearchParams();
-  const preselectedEventId = searchParams.get("event") ? Number(searchParams.get("event")) : null;
+  const searchParams     = useSearchParams();
+  const queryEventId     = searchParams.get("event") ? Number(searchParams.get("event")) : null;
+  const forceSelect      = searchParams.get("select") === "1";
 
-  const [events,      setEvents]      = useState<EventRow[]>([]);
-  const [event,       setEvent]       = useState<EventRow | null>(null);
-  const [items,       setItems]       = useState<EventItem[]>([]);
-  const [promoCount,  setPromoCount]  = useState(0);
-  const [cart,        setCart]        = useState<CartItem[]>([]);
-  const [screen,      setScreen]      = useState<Screen>("event-select");
-  const [query,       setQuery]       = useState("");
-  const [suggestions, setSuggestions] = useState<EventItem[]>([]);
-  const [showSug,     setShowSug]     = useState(false);
-  const [payMethods,  setPayMethods]  = useState<PayMethod[]>([]);
-  const [payMethod,   setPayMethod]   = useState<PayMethod | null>(null);
-  const [reference,   setReference]   = useState("");
-  const [lastTxn,     setLastTxn]     = useState<number | null>(null);
-  const [processing,  setProcessing]  = useState(false);
-  const [toast,       setToast]       = useState<string | null>(null);
-  const [toastErr,    setToastErr]    = useState(false);
+  const [events,           setEvents]           = useState<EventRow[]>([]);
+  const [event,            setEvent]            = useState<EventRow | null>(null);
+  const [items,            setItems]            = useState<EventItem[]>([]);
+  const [promos,           setPromos]           = useState<unknown[]>([]);
+  const [promoCount,       setPromoCount]       = useState(0);
+  const [cart,             setCart]             = useState<CartItem[]>([]);
+  const [screen,           setScreen]           = useState<Screen>("event-select");
+  const [query,            setQuery]            = useState("");
+  const [suggestions,      setSuggestions]      = useState<EventItem[]>([]);
+  const [showSug,          setShowSug]          = useState(false);
+  const [payMethods,       setPayMethods]       = useState<PayMethod[]>([]);
+  const [payMethod,        setPayMethod]        = useState<PayMethod | null>(null);
+  const [reference,        setReference]        = useState("");
+  const [lastTxn,          setLastTxn]          = useState<string | number | null>(null);
+  const [processing,       setProcessing]       = useState(false);
+  const [toast,            setToast]            = useState<string | null>(null);
+  const [toastErr,         setToastErr]         = useState(false);
+  const [online,           setOnline]           = useState(true);
+  const [preparing,        setPreparing]        = useState(false);
+  const [syncing,          setSyncing]          = useState(false);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [localReady,       setLocalReady]       = useState(false);
+  const [preparedEvents,   setPreparedEvents]   = useState<{ id:number; name:string; status:string; location:string|null; preparedAt:string; pendingSyncCount:number }[]>([]);
 
-  const scanRef  = useRef<HTMLInputElement>(null);
-  const sugRef   = useRef<HTMLDivElement>(null);
+  const scanRef = useRef<HTMLInputElement>(null);
+  const sugRef  = useRef<HTMLDivElement>(null);
 
-  // ── Load ───────────────────────────────────────────────────────────────
-  useEffect(() => {
-    fetch("/api/events").then(r => r.json()).then((evs: EventRow[]) => {
-      setEvents(evs);
-      // If a preselected event is given via ?event=, auto-enter it
-      if (preselectedEventId) {
-        const target = evs.find((e) => e.id === preselectedEventId);
-        if (target) selectEvent(target);
-      }
-    });
-    fetch("/api/payment-methods?active=true").then(r => r.json()).then(setPayMethods);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const subtotal  = useMemo(() => cart.reduce((s,i) => s + i.unitPrice  * i.quantity, 0), [cart]);
+  const discount  = useMemo(() => cart.reduce((s,i) => s + i.discountAmt, 0), [cart]);
+  const total     = useMemo(() => cart.reduce((s,i) => s + i.finalPrice * i.quantity, 0), [cart]);
+  const itemCount = useMemo(() => cart.reduce((s,i) => s + i.quantity, 0), [cart]);
 
-  async function selectEvent(ev: EventRow) {
-    setEvent(ev);
-    const [itemData, promoData] = await Promise.all([
-      fetch(`/api/events/${ev.id}/products`).then(r => r.json()),
-      fetch(`/api/events/${ev.id}/promos`).then(r => r.json()),
-    ]);
-    setItems(itemData);
-    setPromoCount((promoData as { isActive: boolean }[]).filter(p => p.isActive).length);
-    setScreen("sell");
-    setTimeout(() => scanRef.current?.focus(), 80);
-  }
-
-  // ── Search ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!query.trim()) { setSuggestions([]); setShowSug(false); return; }
-    const q = query.toLowerCase();
-    const m = items.filter(p =>
-      p.itemId.toLowerCase().includes(q) || p.name.toLowerCase().includes(q) ||
-      (p.variantCode ?? "").toLowerCase().includes(q) || (p.color ?? "").toLowerCase().includes(q)
-    ).slice(0, 10);
-    setSuggestions(m); setShowSug(m.length > 0);
-  }, [query, items]);
-
-  useEffect(() => {
-    const fn = (e: MouseEvent) => {
-      if (sugRef.current && !sugRef.current.contains(e.target as Node)) setShowSug(false);
-    };
-    document.addEventListener("mousedown", fn);
-    return () => document.removeEventListener("mousedown", fn);
-  }, []);
-
-  // ── Toast ──────────────────────────────────────────────────────────────
   function flash(msg: string, err = false) {
     setToast(msg); setToastErr(err);
-    setTimeout(() => setToast(null), 2200);
+    setTimeout(() => { setToast(null); setToastErr(false); }, 2800);
   }
 
-  // ── Promo ──────────────────────────────────────────────────────────────
-  async function getPromo(item: EventItem, qty: number, total: number): Promise<PromoRes> {
-    try {
-      const r = await fetch("/api/promos/calculate", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId: event!.id, eventItemId: item.id, quantity: qty, netPrice: parseFloat(item.netPrice), eventTotal: total }),
-      });
-      if (!r.ok) throw new Error();
-      return r.json();
-    } catch {
-      return { finalUnitPrice: parseFloat(item.netPrice), discountAmt: 0, promoName: null, freeQty: 0 };
+  async function loadPreparedEvents() {
+    try { const d = await fetch("/api/local/prepared-events",{cache:"no-store"}).then(r=>r.json()); setPreparedEvents(Array.isArray(d.events)?d.events:[]); }
+    catch { setPreparedEvents([]); }
+  }
+
+  useEffect(() => {
+    setOnline(navigator.onLine);
+    const on=()=>setOnline(true), off=()=>setOnline(false);
+    window.addEventListener("online",on); window.addEventListener("offline",off);
+    return ()=>{ window.removeEventListener("online",on); window.removeEventListener("offline",off); };
+  },[]);
+
+  useEffect(() => {
+    async function boot() {
+      await loadPreparedEvents();
+      if (forceSelect) { setScreen("event-select"); try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch {} return; }
+      let id = queryEventId;
+      if (id) {
+        const local = await loadLocalBundle(id);
+        if (local) { localStorage.setItem("pos:last-event-id",String(id)); setScreen("sell"); return; }
+        if (navigator.onLine) {
+          try {
+            const evs = await fetch("/api/events",{cache:"no-store"}).then(r=>r.json()); setEvents(evs);
+            const t = evs.find((e:EventRow)=>e.id===id); if (t) { await openLocalEvent(t); return; }
+          } catch { flash("Could not prepare selected event.",true); }
+        }
+        flash("Selected event is not prepared locally.",true); setScreen("event-select"); return;
+      }
+      const saved = localStorage.getItem("pos:last-event-id");
+      if (saved && Number.isFinite(Number(saved))) { const l=await loadLocalBundle(Number(saved)); if(l){setScreen("sell");return;} }
+      try {
+        const state = await fetch("/api/local/pos-state",{cache:"no-store"}).then(r=>r.json());
+        if (state?.event?.id) { const l=await loadLocalBundle(Number(state.event.id)); if(l){localStorage.setItem("pos:last-event-id",String(state.event.id));setScreen("sell");return;} }
+      } catch {}
+      try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch { flash("Offline. No prepared POS event found.",true); }
+      setScreen("event-select");
     }
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  async function prepareEventOffline(eventId: number) {
+    setPreparing(true);
+    try {
+      const res=await fetch(`/api/local/events/${eventId}/prepare`,{method:"POST"}); const data=await res.json();
+      if(!res.ok) throw new Error(data.error||"Failed to prepare.");
+      localStorage.setItem("pos:last-event-id",String(eventId)); applyBundle(data.bundle as LocalBundle); setLocalReady(true); flash("Event prepared for offline POS");
+      return data.bundle as LocalBundle;
+    } catch(e) { flash(e instanceof Error?e.message:"Failed.",true); return null; }
+    finally { setPreparing(false); }
   }
 
-  // ── Cart ───────────────────────────────────────────────────────────────
+  async function loadLocalBundle(eventId: number) {
+    try {
+      const res=await fetch(`/api/local/events/${eventId}/bundle`,{cache:"no-store"}); const data=await res.json();
+      if(!res.ok) throw new Error(data.error||"Not prepared locally.");
+      applyBundle(data as LocalBundle); setLocalReady(true); await refreshPendingCount(eventId);
+      setScreen("sell"); setTimeout(()=>scanRef.current?.focus(),80); return data as LocalBundle;
+    } catch { setLocalReady(false); return null; }
+  }
+
+  function applyBundle(b: LocalBundle) { setEvent(b.event); setItems(b.items); setPromos(b.promos); setPayMethods(b.paymentMethods); setPromoCount(b.promos.length); }
+
+  async function openLocalEvent(ev: EventRow) {
+    localStorage.setItem("pos:last-event-id",String(ev.id));
+    const local = await loadLocalBundle(ev.id); if(local){setScreen("sell");return;}
+    if(!navigator.onLine){flash("Offline. Prepare this event locally first.",true);return;}
+    const prepared = await prepareEventOffline(ev.id);
+    if(prepared){localStorage.setItem("pos:last-event-id",String(ev.id));setScreen("sell");await refreshPendingCount(ev.id);setTimeout(()=>scanRef.current?.focus(),80);}
+  }
+
+  async function refreshPendingCount(eventId: number) {
+    try {
+      const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json());
+      setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed").length:0);
+    } catch { setPendingSyncCount(0); }
+  }
+
+  async function syncLocalTransactions(eventId: number) {
+    if(!navigator.onLine){flash("Cannot sync while offline.",true);return;}
+    setSyncing(true);
+    try {
+      const res=await fetch(`/api/local/events/${eventId}/sync`,{method:"POST"}); const result=await res.json();
+      if(!res.ok) throw new Error(result.error||"Sync failed.");
+      await refreshPendingCount(eventId);
+      if(result.failed>0){const fe=result.results?.find((r:any)=>!r.ok)?.error; flash(fe?`${result.synced} synced, ${result.failed} failed: ${fe}`:`${result.synced} synced, ${result.failed} failed`,true);return;}
+      flash(`${result.synced} transactions synced`);
+    } catch(e) { flash(e instanceof Error?e.message:"Sync failed.",true); }
+    finally { setSyncing(false); }
+  }
+
+  useEffect(() => {
+    if(!query.trim()){setSuggestions([]);setShowSug(false);return;}
+    const q=query.toLowerCase();
+    const m=items.filter(it=>it.itemId.toLowerCase().includes(q)||it.name.toLowerCase().includes(q)||(it.variantCode??"").toLowerCase().includes(q)||(it.color??"").toLowerCase().includes(q)).slice(0,12);
+    setSuggestions(m); setShowSug(m.length>0);
+  },[query,items]);
+
+  useEffect(()=>{
+    const fn=(e:MouseEvent)=>{if(sugRef.current&&!sugRef.current.contains(e.target as Node))setShowSug(false);};
+    document.addEventListener("mousedown",fn); return ()=>document.removeEventListener("mousedown",fn);
+  },[]);
+
+  async function getPromo(item: EventItem): Promise<PromoRes> {
+    return { finalUnitPrice: Number(item.netPrice), discountAmt: 0, promoName: null, freeQty: 0 };
+  }
+
   async function addItem(item: EventItem) {
-    const curTotal = cart.reduce((s, i) => s + i.finalPrice * i.quantity, 0);
-    const curQty   = cart.find(c => c.eventItemId === item.id)?.quantity ?? 0;
-    const newQty   = curQty + 1;
-    const promo    = await getPromo(item, newQty, curTotal);
-    setCart(prev => {
-      const row: CartItem = {
-        eventItemId: item.id, itemId: item.itemId, productName: item.name,
-        variantCode: item.variantCode, color: item.color,
-        quantity: newQty, unitPrice: parseFloat(item.netPrice),
-        discountAmt: promo.discountAmt, finalPrice: promo.finalUnitPrice,
-        promoApplied: promo.promoName, freeQty: promo.freeQty,
-      };
-      const exists = prev.find(c => c.eventItemId === item.id);
-      if (exists) return prev.map(c => c.eventItemId === item.id ? row : c);
-      return [...prev, row];
-    });
-    setQuery(""); setShowSug(false);
-    scanRef.current?.focus();
+    const eq=cart.find(r=>r.eventItemId===item.id)?.quantity??0; const stock=Number(item.stock??0);
+    if(stock<=0){flash("Item is out of stock.",true);setQuery("");scanRef.current?.focus();return;}
+    if(eq+1>stock){flash("Not enough local stock.",true);setQuery("");scanRef.current?.focus();return;}
+    const promo=await getPromo(item);
+    const row:CartItem={eventItemId:item.id,itemId:item.itemId,productName:item.name,variantCode:item.variantCode,color:item.color,quantity:eq+1,unitPrice:Number(item.netPrice),discountAmt:promo.discountAmt,finalPrice:promo.finalUnitPrice,promoApplied:promo.promoName,freeQty:promo.freeQty};
+    setCart(p=>p.some(r=>r.eventItemId===item.id)?p.map(r=>r.eventItemId===item.id?row:r):[...p,row]);
+    setQuery(""); setShowSug(false); setTimeout(()=>scanRef.current?.focus(),50);
   }
 
   async function changeQty(eventItemId: number, qty: number) {
-    if (qty < 1) { setCart(p => p.filter(i => i.eventItemId !== eventItemId)); return; }
-    const item = items.find(p => p.id === eventItemId);
-    if (!item) return;
-    const curTotal = cart.filter(i => i.eventItemId !== eventItemId).reduce((s, i) => s + i.finalPrice * i.quantity, 0);
-    const promo    = await getPromo(item, qty, curTotal);
-    setCart(prev => prev.map(i => i.eventItemId === eventItemId
-      ? { ...i, quantity: qty, discountAmt: promo.discountAmt, finalPrice: promo.finalUnitPrice, promoApplied: promo.promoName, freeQty: promo.freeQty }
-      : i
-    ));
+    if(qty<1){setCart(p=>p.filter(r=>r.eventItemId!==eventItemId));return;}
+    const item=items.find(r=>r.id===eventItemId); if(!item)return;
+    if(qty>Number(item.stock??0)){flash("Not enough local stock.",true);return;}
+    const promo=await getPromo(item);
+    setCart(p=>p.map(r=>r.eventItemId===eventItemId?{...r,quantity:qty,discountAmt:promo.discountAmt,finalPrice:promo.finalUnitPrice,promoApplied:promo.promoName,freeQty:promo.freeQty}:r));
   }
 
-  async function handleScan(e: React.FormEvent) {
-    e.preventDefault();
-    const q = query.trim(); if (!q) return;
-    const exact = items.find(p => p.itemId.toLowerCase() === q.toLowerCase());
-    if (exact) { addItem(exact); return; }
-    flash("Not found in this event", true); setQuery("");
+  function handleScan(e: React.FormEvent) {
+    e.preventDefault(); const q=query.trim().toLowerCase(); if(!q)return;
+    const exact=items.find(it=>it.itemId.toLowerCase()===q||it.variantCode?.toLowerCase()===q);
+    if(exact){addItem(exact);return;} if(suggestions.length===1){addItem(suggestions[0]);return;} if(suggestions.length===0)flash("Product not found.",true);
   }
 
-  // ── Totals ─────────────────────────────────────────────────────────────
-  const subtotal  = cart.reduce((s, i) => s + i.unitPrice   * i.quantity, 0);
-  const discount  = cart.reduce((s, i) => s + i.discountAmt * i.quantity, 0);
-  const total     = cart.reduce((s, i) => s + i.finalPrice  * i.quantity, 0);
-  const itemCount = cart.reduce((s, i) => s + i.quantity, 0);
-
-  // ── Checkout — posts to per-event transaction route ────────────────────
   async function confirmPayment() {
-    if (!payMethod || !event) return;
-    setProcessing(true);
-    const label = `${payMethod.name}${payMethod.provider ? ` (${payMethod.provider})` : ""}`;
-    const res = await fetch(`/api/events/${event.id}/transactions`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        totalAmount: subtotal, discount, finalAmount: total,
-        paymentMethod: label, paymentReference: reference || null,
-        items: cart.map(i => ({
-          eventItemId: i.eventItemId, itemId: i.itemId, productName: i.productName,
-          quantity: i.quantity, unitPrice: i.unitPrice, discountAmt: i.discountAmt,
-          finalPrice: i.finalPrice, subtotal: i.finalPrice * i.quantity,
-          promoApplied: i.promoApplied, freeQty: i.freeQty,
-        })),
-      }),
-    });
-    const txn = await res.json();
-    setLastTxn(txn.id); setProcessing(false); setScreen("success");
+    if(!event||!payMethod||cart.length===0)return; setProcessing(true);
+    try {
+      const label=`${payMethod.name}${payMethod.provider?` (${payMethod.provider})`:""}`;
+      const cid=makeClientTxnId(event.id);
+      const payload={clientTxnId:cid,totalAmount:subtotal,discount,finalAmount:total,paymentMethod:label,paymentReference:reference||null,createdAt:new Date().toISOString(),
+        items:cart.map(it=>({eventItemId:it.eventItemId,itemId:it.itemId,productName:it.productName,quantity:it.quantity,unitPrice:it.unitPrice,discountAmt:it.discountAmt,finalPrice:it.finalPrice,subtotal:it.finalPrice*it.quantity,promoApplied:it.promoApplied}))};
+      const res=await fetch(`/api/local/events/${event.id}/transactions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const saved=await res.json(); if(!res.ok)throw new Error(saved.error||"Failed to save.");
+      const fresh=await loadLocalBundle(event.id); if(fresh)setItems(fresh.items);
+      await refreshPendingCount(event.id); setLastTxn(saved.clientTxnId??cid); setScreen("success");
+    } catch(e){ flash(e instanceof Error?e.message:"Failed to save local transaction.",true); }
+    finally { setProcessing(false); }
   }
 
-  function nextTransaction() {
-    setCart([]); setPayMethod(null); setReference(""); setScreen("sell");
-    setTimeout(() => scanRef.current?.focus(), 80);
-  }
+  function nextTransaction() { setCart([]); setPayMethod(null); setReference(""); setQuery(""); setScreen("sell"); setTimeout(()=>scanRef.current?.focus(),80); }
+  function exitPOS() { window.location.href = "/"; }
 
-  function exitPOS() {
-    setCart([]); setEvent(null); setScreen("event-select");
-    // If we came from an event page, go back there
-    if (preselectedEventId) {
-      window.location.href = `/events/${preselectedEventId}`;
-    }
-  }
+  // ── Event Select ──────────────────────────────────────────────────────────
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // SCREEN: Event select
-  // ─────────────────────────────────────────────────────────────────────────
   if (screen === "event-select") {
-    const active = events.filter(e => e.status === "active");
-    const draft  = events.filter(e => e.status === "draft");
     return (
-      <div className="h-screen w-screen flex items-center justify-center"
-        style={{ background: "#f8f8f6" }}>
-        <div className="w-full max-w-md px-4">
-          <div className="text-center mb-10">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4"
-              style={{ background: "var(--brand-orange)" }}>
-              <Zap size={28} color="white" strokeWidth={2.5} />
+      <div className="min-h-screen" style={{ background: "#fafaf8" }}>
+        <style>{KEYFRAMES}</style>
+
+        {toast && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl"
+            style={{ background: toastErr?"#ef4444":"#16a34a", color:"white" }}>{toast}</div>
+        )}
+
+        {/* Header bar */}
+        <div style={{ background:"white", borderBottom:"1px solid #e5e7eb" }}>
+          <div className="max-w-2xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background:"var(--brand-orange)", color:"white" }}>
+                <Zap size={17} strokeWidth={2.5} />
+              </div>
+              <div>
+                <p className="text-sm font-black tracking-tight" style={{ color:"#111" }}>Point of Sale</p>
+                <p className="text-xs" style={{ color:"#9ca3af" }}>Choose an event to open</p>
+              </div>
             </div>
-            <h1 className="text-2xl font-black tracking-tight" style={{ color: "#111" }}>Point of Sale</h1>
-            <p className="text-sm mt-1" style={{ color: "#9ca3af" }}>Select an event to start</p>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold"
+              style={{ background:online?"rgba(22,163,74,0.08)":"rgba(245,158,11,0.1)", color:online?"#16a34a":"#b45309" }}>
+              {online ? <Wifi size={11} /> : <WifiOff size={11} />}
+              {online ? "Online" : "Offline"}
+            </div>
           </div>
+        </div>
 
-          {active.length > 0 && (
-            <div className="space-y-2 mb-4">
-              <p className="text-[11px] font-bold uppercase tracking-widest px-1" style={{ color: "#9ca3af" }}>Live</p>
-              {active.map(ev => (
-                <button key={ev.id} onClick={() => selectEvent(ev)}
-                  className="w-full rounded-2xl p-5 text-left transition-all hover:shadow-md"
-                  style={{ background: "white", border: "1.5px solid #e5e7eb" }}>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="w-2 h-2 rounded-full inline-block" style={{ background: "#16a34a" }} />
-                        <p className="font-bold text-sm" style={{ color: "#111" }}>{ev.name}</p>
+        <div className="max-w-2xl mx-auto px-6 py-8 space-y-8">
+
+          {/* Prepared local events */}
+          {preparedEvents.length > 0 && (
+            <section className="anim-fade-up">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-1 h-4 rounded-full" style={{ background:"var(--brand-orange)" }} />
+                <p className="text-xs font-bold uppercase tracking-widest" style={{ color:"#374151" }}>Ready to Sell</p>
+              </div>
+              <div className="space-y-2">
+                {preparedEvents.map((ev, i) => {
+                  const s = STATUS_STYLE[ev.status] ?? STATUS_STYLE.draft;
+                  return (
+                    <button key={ev.id}
+                      onClick={()=>{ localStorage.setItem("pos:last-event-id",String(ev.id)); loadLocalBundle(ev.id).then(b=>b&&setScreen("sell")); }}
+                      className="anim-fade-up w-full text-left rounded-2xl px-5 py-4 transition-all group hover:shadow-md"
+                      style={{ background:"white", border:`1.5px solid ${s.border}`, animationDelay:`${i*55}ms`, boxShadow:"0 1px 4px rgba(0,0,0,0.04)" }}>
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:s.bg }}>
+                          <span className="w-2.5 h-2.5 rounded-full block"
+                            style={{ background:s.dot, animation:ev.status==="active"?"pulseDot 2s ease-in-out infinite":undefined }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-bold text-[15px] truncate" style={{ color:"#111" }}>{ev.name}</p>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0" style={{ background:s.bg, color:s.dot }}>{s.label}</span>
+                          </div>
+                          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                            {ev.location && <span className="flex items-center gap-1 text-xs" style={{ color:"#9ca3af" }}><MapPin size={10}/>{ev.location}</span>}
+                            <span className="flex items-center gap-1 text-xs font-medium" style={{ color:"#0369a1" }}><Database size={9}/>Local ready</span>
+                            {ev.pendingSyncCount > 0 && <span className="text-[11px] font-bold px-1.5 py-0.5 rounded-md" style={{ background:"rgba(245,158,11,0.1)", color:"#b45309" }}>{ev.pendingSyncCount} unsynced</span>}
+                          </div>
+                        </div>
+                        <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-110"
+                          style={{ background:"var(--brand-orange)", color:"white" }}>
+                          <ArrowRight size={14} />
+                        </div>
                       </div>
-                      {ev.location && <p className="text-xs pl-4" style={{ color: "#9ca3af" }}>{ev.location}</p>}
-                    </div>
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold"
-                      style={{ background: "var(--brand-orange)", color: "white" }}>
-                      Open <ChevronRight size={12} />
-                    </div>
-                  </div>
-                </button>
-              ))}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Online events */}
+          {events.length > 0 && (
+            <section className="anim-fade-up" style={{ animationDelay:"80ms" }}>
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-1 h-4 rounded-full" style={{ background:"#e5e7eb" }} />
+                <p className="text-xs font-bold uppercase tracking-widest" style={{ color:"#374151" }}>Available Events</p>
+              </div>
+              <div className="space-y-2">
+                {events.map((ev, i) => {
+                  const s = STATUS_STYLE[ev.status] ?? STATUS_STYLE.draft;
+                  return (
+                    <button key={ev.id} onClick={()=>openLocalEvent(ev)} disabled={preparing}
+                      className="anim-fade-up w-full text-left rounded-2xl px-5 py-4 transition-all group hover:shadow-sm disabled:opacity-50"
+                      style={{ background:"white", border:"1.5px solid #e5e7eb", animationDelay:`${(i+preparedEvents.length)*55}ms`, boxShadow:"0 1px 3px rgba(0,0,0,0.03)" }}>
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:s.bg }}>
+                          <span className="w-2.5 h-2.5 rounded-full block" style={{ background:s.dot }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-bold text-[15px] truncate" style={{ color:"#111" }}>{ev.name}</p>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0" style={{ background:s.bg, color:s.dot }}>{s.label}</span>
+                          </div>
+                          {ev.location && <span className="flex items-center gap-1 text-xs mt-0.5" style={{ color:"#9ca3af" }}><MapPin size={10}/>{ev.location}</span>}
+                        </div>
+                        {preparing
+                          ? <div className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl flex-shrink-0" style={{ background:"rgba(255,101,63,0.08)", color:"var(--brand-orange)" }}><RefreshCw size={11} className="animate-spin"/>Preparing…</div>
+                          : <div className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-xl border flex-shrink-0 transition-all group-hover:border-orange-300 group-hover:text-orange-600" style={{ borderColor:"#e5e7eb", color:"#6b7280" }}>Open<ChevronRight size={11}/></div>
+                        }
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {preparedEvents.length === 0 && events.length === 0 && (
+            <div className="rounded-2xl p-10 text-center anim-fade-up" style={{ background:"white", border:"1.5px solid #e5e7eb" }}>
+              <div className="w-12 h-12 rounded-2xl mx-auto mb-3 flex items-center justify-center" style={{ background:"#f3f4f6" }}>
+                <Package size={20} style={{ color:"#9ca3af" }} />
+              </div>
+              <p className="font-semibold text-sm mb-1" style={{ color:"#374151" }}>No events available</p>
+              <p className="text-xs" style={{ color:"#9ca3af" }}>
+                {online ? "No events found. Create one from the dashboard." : "Connect to the internet to load events."}
+              </p>
             </div>
           )}
 
-          {draft.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[11px] font-bold uppercase tracking-widest px-1" style={{ color: "#9ca3af" }}>Draft</p>
-              {draft.map(ev => (
-                <button key={ev.id} onClick={() => selectEvent(ev)}
-                  className="w-full rounded-2xl p-4 text-left transition-all opacity-60 hover:opacity-80"
-                  style={{ background: "white", border: "1.5px solid #e5e7eb" }}>
-                  <p className="font-semibold text-sm" style={{ color: "#111" }}>{ev.name}</p>
-                  {ev.location && <p className="text-xs mt-0.5" style={{ color: "#9ca3af" }}>{ev.location}</p>}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {events.length === 0 && (
-            <p className="text-center text-sm" style={{ color: "#9ca3af" }}>
-              No events found. <a href="/events" className="underline" style={{ color: "var(--brand-orange)" }}>Create one →</a>
-            </p>
-          )}
-
-          <div className="mt-8 text-center">
-            <a href="/" className="text-xs" style={{ color: "#d1d5db" }}>← Back to dashboard</a>
+          <div className="text-center pt-2">
+            <a href="/" className="text-xs" style={{ color:"#d1d5db" }}>← Back to dashboard</a>
           </div>
         </div>
       </div>
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // SCREEN: Success / receipt
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Success ───────────────────────────────────────────────────────────────
+
   if (screen === "success") {
     return (
-      <div className="h-screen w-screen flex items-center justify-center" style={{ background: "#f8f8f6" }}>
+      <div className="h-screen w-screen flex items-center justify-center p-4" style={{ background:"#fafaf8" }}>
         <div className="w-full max-w-sm">
-          <div className="rounded-2xl overflow-hidden" style={{ background: "#fafaf8" }}>
-            <div className="px-6 pt-6 pb-4 text-center" style={{ borderBottom: "2px dashed #d1d5db" }}>
-              <CheckCircle2 size={36} className="mx-auto mb-2" style={{ color: "#16a34a" }} />
-              <p className="font-black text-lg" style={{ color: "#111" }}>PAYMENT CONFIRMED</p>
-              <p className="text-xs font-mono mt-0.5" style={{ color: "#6b7280" }}>
-                TXN #{String(lastTxn).padStart(6, "0")}
-              </p>
+          <div className="rounded-2xl overflow-hidden shadow-sm" style={{ background:"white", border:"1.5px solid #e5e7eb" }}>
+            <div className="px-6 pt-6 pb-4 text-center" style={{ borderBottom:"2px dashed #e5e7eb" }}>
+              <div className="w-12 h-12 rounded-full mx-auto mb-3 flex items-center justify-center" style={{ background:"rgba(22,163,74,0.1)" }}>
+                <CheckCircle2 size={22} style={{ color:"#16a34a" }} />
+              </div>
+              <p className="font-black text-base" style={{ color:"#111" }}>Sale Saved Locally</p>
+              <p className="text-xs font-mono mt-0.5" style={{ color:"#9ca3af" }}>{String(lastTxn)}</p>
+              <p className="text-[11px] mt-1.5" style={{ color:"#9ca3af" }}>Sync to cloud when you have a stable connection.</p>
             </div>
-
-            <div className="px-6 py-4 space-y-2" style={{ borderBottom: "2px dashed #d1d5db" }}>
+            <div className="px-6 py-4 space-y-2" style={{ borderBottom:"1.5px solid #f3f4f6" }}>
               {cart.map(item => (
-                <div key={item.eventItemId} className="flex justify-between items-start">
-                  <div className="flex-1 min-w-0 pr-3">
-                    <p className="text-xs font-bold leading-tight" style={{ color: "#111" }}>
-                      {item.productName}
-                      {item.variantCode && <span className="ml-1 font-normal" style={{ color: "#6b7280" }}>({item.variantCode})</span>}
-                    </p>
-                    <p className="text-xs font-mono mt-0.5" style={{ color: "#9ca3af" }}>
-                      {mono(item.finalPrice)} × {item.quantity}
-                      {item.promoApplied && <span className="ml-1.5 text-green-600">[{item.promoApplied}]</span>}
-                    </p>
+                <div key={item.eventItemId} className="flex justify-between items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold truncate" style={{ color:"#111" }}>{item.productName}{item.variantCode&&<span style={{color:"#9ca3af"}}> ({item.variantCode})</span>}</p>
+                    <p className="text-xs font-mono" style={{ color:"#9ca3af" }}>{money(item.finalPrice)} × {item.quantity}</p>
                   </div>
-                  <p className="text-xs font-bold font-mono flex-shrink-0" style={{ color: "#111" }}>
-                    {mono(item.finalPrice * item.quantity)}
-                  </p>
+                  <p className="text-xs font-bold font-mono flex-shrink-0" style={{ color:"#111" }}>{money(item.finalPrice*item.quantity)}</p>
                 </div>
               ))}
             </div>
-
-            <div className="px-6 py-4 space-y-1.5" style={{ borderBottom: "2px dashed #d1d5db" }}>
-              {discount > 0 && (
-                <>
-                  <div className="flex justify-between text-xs font-mono">
-                    <span style={{ color: "#6b7280" }}>SUBTOTAL</span>
-                    <span style={{ color: "#6b7280" }}>{mono(subtotal)}</span>
-                  </div>
-                  <div className="flex justify-between text-xs font-mono">
-                    <span style={{ color: "#16a34a" }}>DISCOUNT</span>
-                    <span style={{ color: "#16a34a" }}>- {mono(discount)}</span>
-                  </div>
-                </>
-              )}
+            <div className="px-6 py-4">
+              {discount>0&&<div className="flex justify-between text-xs mb-1"><span style={{color:"#9ca3af"}}>Subtotal</span><span className="font-mono" style={{color:"#9ca3af"}}>{money(subtotal)}</span></div>}
               <div className="flex justify-between items-baseline">
-                <span className="text-xs font-bold font-mono" style={{ color: "#111" }}>TOTAL</span>
-                <span className="text-2xl font-black font-mono" style={{ color: "#111" }}>{mono(total)}</span>
+                <span className="text-xs font-bold uppercase tracking-widest" style={{ color:"#9ca3af" }}>Total</span>
+                <span className="text-2xl font-black font-mono" style={{ color:"#111" }}>{money(total)}</span>
               </div>
-              <p className="text-xs font-mono" style={{ color: "#9ca3af" }}>
-                via {payMethod?.name}{payMethod?.provider ? ` · ${payMethod.provider}` : ""}
-              </p>
-            </div>
-
-            <div className="px-6 py-4 text-center">
-              <p className="text-[10px] font-mono" style={{ color: "#d1d5db" }}>
-                {event?.name} · {new Date().toLocaleString("id-ID")}
-              </p>
+              <p className="text-xs mt-1" style={{ color:"#9ca3af" }}>via {payMethod?.name}{payMethod?.provider?` · ${payMethod.provider}`:""}</p>
             </div>
           </div>
-
           <div className="flex gap-2 mt-4">
-            <button onClick={nextTransaction}
-              className="flex-1 rounded-xl py-3.5 text-sm font-black"
-              style={{ background: "var(--brand-orange)", color: "white" }}>
-              Next Sale
+            <button onClick={nextTransaction} className="flex-1 rounded-xl py-3.5 text-sm font-black" style={{ background:"var(--brand-orange)", color:"white" }}>Next Sale</button>
+            <button onClick={()=>event?.id&&syncLocalTransactions(event.id)} disabled={syncing||!online}
+              className="px-4 rounded-xl text-sm font-semibold border disabled:opacity-40" style={{ borderColor:"#e5e7eb", color:"#0369a1", background:"white" }}>
+              {syncing?"Syncing…":"Sync"}
             </button>
-            <button onClick={exitPOS}
-              className="px-4 rounded-xl text-sm font-semibold border"
-              style={{ borderColor: "#e5e7eb", color: "#6b7280", background: "white" }}>
-              Exit
-            </button>
+            <button onClick={exitPOS} className="px-4 rounded-xl text-sm font-semibold border" style={{ borderColor:"#e5e7eb", color:"#9ca3af", background:"white" }}>Exit</button>
           </div>
         </div>
       </div>
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // SCREEN: Payment
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Payment ───────────────────────────────────────────────────────────────
+
   if (screen === "payment") {
-    const grouped = Object.entries(
-      payMethods.reduce<Record<string, PayMethod[]>>((acc, pm) => {
-        acc[pm.type] = [...(acc[pm.type] ?? []), pm]; return acc;
-      }, {})
-    );
+    const grouped  = Object.entries(payMethods.reduce<Record<string,PayMethod[]>>((a,pm)=>{a[pm.type]=[...(a[pm.type]??[]),pm];return a;},{}));
     const needsRef = payMethod && payMethod.type !== "cash";
     return (
-      <div className="h-screen w-screen flex" style={{ background: "#f8f8f6" }}>
-        <div className="flex-1 flex flex-col items-center justify-center px-10"
-          style={{ borderRight: "1px solid #e5e7eb" }}>
-          <button onClick={() => { setScreen("sell"); setPayMethod(null); setReference(""); }}
-            className="flex items-center gap-1.5 text-xs mb-12 self-start"
-            style={{ color: "#9ca3af" }}>
-            <ArrowLeft size={13} /> Back
+      <div className="h-screen w-screen flex" style={{ background:"#fafaf8" }}>
+        <div className="flex-1 flex flex-col items-center justify-center px-10" style={{ borderRight:"1px solid #e5e7eb" }}>
+          <button onClick={()=>{setScreen("sell");setPayMethod(null);setReference("");}} className="flex items-center gap-1.5 text-xs mb-12 self-start" style={{ color:"#9ca3af" }}>
+            <ArrowLeft size={13}/> Back to cart
           </button>
-          <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: "#9ca3af" }}>Total Due</p>
-          <p className="text-6xl font-black tracking-tight" style={{ color: "#111" }}>{mono(total)}</p>
-          {discount > 0 && (
-            <div className="mt-3 flex items-center gap-2">
-              <span className="line-through text-sm" style={{ color: "#d1d5db" }}>{mono(subtotal)}</span>
-              <span className="text-sm font-bold" style={{ color: "#16a34a" }}>− {mono(discount)} saved</span>
-            </div>
-          )}
-          <div className="mt-8 w-full max-w-xs rounded-xl p-4 space-y-1.5"
-            style={{ background: "white", border: "1px solid #e5e7eb" }}>
-            {cart.map(item => (
+          <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color:"#9ca3af" }}>Total Due</p>
+          <p className="text-6xl font-black tracking-tight" style={{ color:"#111" }}>{money(total)}</p>
+          {discount>0&&<div className="mt-3 flex items-center gap-2"><span className="line-through text-sm" style={{color:"#d1d5db"}}>{money(subtotal)}</span><span className="text-sm font-bold" style={{color:"#16a34a"}}>− {money(discount)} saved</span></div>}
+          <div className="mt-8 w-full max-w-xs rounded-2xl p-4 space-y-2" style={{ background:"white", border:"1.5px solid #e5e7eb" }}>
+            {cart.map(item=>(
               <div key={item.eventItemId} className="flex justify-between text-xs font-mono">
-                <span style={{ color: "#6b7280" }}>
-                  {item.productName.slice(0, 20)}{item.variantCode ? ` (${item.variantCode})` : ""} ×{item.quantity}
-                </span>
-                <span style={{ color: "#111" }}>{mono(item.finalPrice * item.quantity)}</span>
+                <span style={{color:"#6b7280"}}>{item.productName.slice(0,22)}{item.variantCode?` (${item.variantCode})`:""} ×{item.quantity}</span>
+                <span style={{color:"#111"}}>{money(item.finalPrice*item.quantity)}</span>
               </div>
             ))}
           </div>
         </div>
-
-        <div className="w-96 flex flex-col px-6 py-6 overflow-y-auto"
-          style={{ background: "white", borderLeft: "1px solid #e5e7eb" }}>
-          <p className="text-xs font-bold uppercase tracking-widest mb-5" style={{ color: "#9ca3af" }}>Payment Method</p>
+        <div className="w-96 flex flex-col px-6 py-6 overflow-y-auto" style={{ background:"white" }}>
+          <p className="text-xs font-bold uppercase tracking-widest mb-5" style={{ color:"#9ca3af" }}>Payment Method</p>
           <div className="space-y-4 flex-1">
-            {grouped.map(([type, methods]) => (
+            {grouped.map(([type,methods])=>(
               <div key={type}>
-                <p className="text-[11px] uppercase tracking-widest mb-2 font-semibold" style={{ color: "#d1d5db" }}>
-                  {type === "ewallet" ? "E-Wallet" : type}
-                </p>
+                <p className="text-[11px] uppercase tracking-widest mb-2 font-semibold" style={{ color:"#d1d5db" }}>{type==="ewallet"?"E-Wallet":type}</p>
                 <div className="space-y-1.5">
-                  {methods.map(pm => {
-                    const sel   = payMethod?.id === pm.id;
-                    const color = PAY_COLOR[pm.type] ?? "#374151";
+                  {methods.map(pm=>{
+                    const sel=payMethod?.id===pm.id; const color=PAY_COLOR[pm.type]??"#374151";
                     return (
-                      <button key={pm.id}
-                        onClick={() => { setPayMethod(pm); setReference(""); }}
+                      <button key={pm.id} onClick={()=>{setPayMethod(pm);setReference("");}}
                         className="w-full flex items-center gap-3 rounded-xl px-4 py-3.5 text-left transition-all"
-                        style={{
-                          background: sel ? `${color}10` : "#f9fafb",
-                          border:     sel ? `1.5px solid ${color}50` : "1.5px solid #e5e7eb",
-                        }}>
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                          style={{ background: sel ? `${color}15` : "#f3f4f6", color: sel ? color : "#9ca3af" }}>
-                          {PAY_ICON[pm.type] ?? <CreditCard size={16} />}
-                        </div>
+                        style={{ background:sel?`${color}08`:"#f9fafb", border:sel?`1.5px solid ${color}40`:"1.5px solid #e5e7eb" }}>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background:sel?`${color}15`:"#f3f4f6", color:sel?color:"#9ca3af" }}>{PAY_ICON[pm.type]??<CreditCard size={16}/>}</div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold" style={{ color: sel ? color : "#111" }}>{pm.name}</p>
-                          {pm.provider && <p className="text-xs" style={{ color: "#9ca3af" }}>{pm.provider}</p>}
+                          <p className="text-sm font-semibold" style={{ color:sel?color:"#111" }}>{pm.name}</p>
+                          {pm.provider&&<p className="text-xs" style={{color:"#9ca3af"}}>{pm.provider}</p>}
                         </div>
-                        {sel && <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />}
+                        {sel&&<div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background:color }}/>}
                       </button>
                     );
                   })}
@@ -436,96 +467,140 @@ function POSInner() {
               </div>
             ))}
           </div>
-
-          {needsRef && (
+          {needsRef&&(
             <div className="mt-4">
-              <label className="block text-xs font-bold uppercase tracking-widest mb-2" style={{ color: "#9ca3af" }}>
-                Reference / Code
-              </label>
-              <input value={reference} onChange={e => setReference(e.target.value)}
-                placeholder="EDC approval / QR ref…" autoFocus
+              <label className="block text-xs font-bold uppercase tracking-widest mb-2" style={{ color:"#9ca3af" }}>Reference / Code</label>
+              <input value={reference} onChange={e=>setReference(e.target.value)} placeholder="EDC approval / QR ref…" autoFocus
                 className="w-full rounded-xl px-4 py-3 text-sm font-mono focus:outline-none"
-                style={{ background: "#f9fafb", border: "1.5px solid #e5e7eb", color: "#111" }} />
+                style={{ background:"#f9fafb", border:"1.5px solid #e5e7eb", color:"#111" }} />
             </div>
           )}
-
-          <button onClick={confirmPayment}
-            disabled={!payMethod || processing}
+          <button onClick={confirmPayment} disabled={!payMethod||processing}
             className="mt-4 w-full rounded-xl py-4 text-base font-black transition-all disabled:opacity-30"
-            style={{ background: payMethod ? "var(--brand-orange)" : "#f3f4f6", color: payMethod ? "white" : "#9ca3af" }}>
-            {processing ? "Processing…" : payMethod ? `Confirm ${mono(total)}` : "Choose a method"}
+            style={{ background:payMethod?"var(--brand-orange)":"#f3f4f6", color:payMethod?"white":"#9ca3af" }}>
+            {processing?"Saving locally…":payMethod?`Confirm ${money(total)}`:"Choose a method"}
           </button>
         </div>
       </div>
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // SCREEN: Main sell
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Sell ──────────────────────────────────────────────────────────────────
+
+  const ss = STATUS_STYLE[event?.status??"draft"] ?? STATUS_STYLE.draft;
+
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background: "#f8f8f6" }}>
-      {toast && (
+    <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background:"#fafaf8" }}>
+      <style>{KEYFRAMES}</style>
+
+      {toast&&(
         <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl pointer-events-none"
-          style={{ background: toastErr ? "#ef4444" : "#16a34a", color: "white" }}>
-          {toast}
-        </div>
+          style={{ background:toastErr?"#ef4444":"#16a34a", color:"white" }}>{toast}</div>
       )}
 
-      {/* Topbar */}
-      <div className="flex items-center h-12 px-5 gap-3 flex-shrink-0"
-        style={{ background: "white", borderBottom: "1px solid #e5e7eb" }}>
-        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: "#16a34a" }} />
-        <p className="text-sm font-bold truncate" style={{ color: "#111" }}>{event?.name}</p>
-        {event?.location && (
-          <p className="text-xs hidden md:block truncate" style={{ color: "#9ca3af" }}>· {event.location}</p>
-        )}
-        {promoCount > 0 && (
-          <span className="text-[11px] px-2 py-0.5 rounded-full font-bold flex-shrink-0"
-            style={{ background: "rgba(255,101,63,0.1)", color: "var(--brand-orange)" }}>
-            <Tag size={9} className="inline mr-0.5" />{promoCount} promo
+      {/* ── Topbar ──────────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 px-4 flex-shrink-0"
+        style={{ background:"white", borderBottom:"1px solid #e5e7eb", height:52 }}>
+
+        {/* Event identity */}
+        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+          <span className="w-2 h-2 rounded-full flex-shrink-0"
+            style={{ background:ss.dot, animation:event?.status==="active"?"pulseDot 2s ease-in-out infinite":undefined }} />
+          <p className="text-sm font-bold truncate" style={{ color:"#111" }}>{event?.name}</p>
+          {event?.location&&(
+            <span className="hidden lg:flex items-center gap-1 text-xs flex-shrink-0" style={{ color:"#9ca3af" }}>
+              <MapPin size={10}/>{event.location}
+            </span>
+          )}
+        </div>
+
+        {/* Status chips */}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className="hidden sm:flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg"
+            style={{ background:"rgba(3,105,161,0.07)", color:"#0369a1" }}>
+            <Database size={9}/>SQLite
           </span>
-        )}
-        <div className="flex-1" />
-        {itemCount > 0 && (
-          <span className="text-xs px-2.5 py-1 rounded-full font-bold flex-shrink-0"
-            style={{ background: "#f3f4f6", color: "#374151" }}>
-            {itemCount} item{itemCount > 1 ? "s" : ""} · {mono(total)}
+          <span className="flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg"
+            style={{ background:online?"rgba(22,163,74,0.07)":"rgba(245,158,11,0.1)", color:online?"#16a34a":"#b45309" }}>
+            {online?<Wifi size={9}/>:<WifiOff size={9}/>}{online?"Online":"Offline"}
           </span>
-        )}
-        <button onClick={exitPOS}
-          className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all"
-          style={{ color: "#9ca3af", background: "white", borderColor: "#e5e7eb" }}>
-          <LogOut size={12} /> Exit
-        </button>
+          {promoCount>0&&(
+            <span className="hidden sm:flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg"
+              style={{ background:"rgba(255,101,63,0.08)", color:"var(--brand-orange)" }}>
+              <Tag size={9}/>{promoCount}
+            </span>
+          )}
+          {pendingSyncCount>0?(
+            <button onClick={()=>event?.id&&syncLocalTransactions(event.id)} disabled={syncing||!online}
+              className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-lg transition-all disabled:opacity-40"
+              style={{ background:"rgba(245,158,11,0.1)", color:"#b45309" }}>
+              {syncing?<><RefreshCw size={9} className="animate-spin"/>Syncing</>:<><CloudUpload size={9}/>{pendingSyncCount} unsynced</>}
+            </button>
+          ):(localReady&&(
+            <span className="hidden sm:flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg"
+              style={{ background:"rgba(22,163,74,0.07)", color:"#16a34a" }}>
+              <Check size={9}/>Synced
+            </span>
+          ))}
+          {itemCount>0&&(
+            <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg"
+              style={{ background:"#f3f4f6", color:"#374151" }}>
+              {itemCount} · {money(total)}
+            </span>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={()=>event?.id&&prepareEventOffline(event.id)} disabled={preparing||!online}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-all disabled:opacity-40"
+            style={{ color:"#0369a1", background:"white", borderColor:"#e5e7eb" }}>
+            {preparing?<RefreshCw size={11} className="animate-spin"/>:<Database size={11}/>}
+            <span className="hidden sm:inline">Refresh</span>
+          </button>
+          <button onClick={()=>{ setCart([]); setPayMethod(null); setReference(""); setQuery(""); window.location.href="/pos?select=1"; }}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-all"
+            style={{ color:"#374151", background:"white", borderColor:"#e5e7eb" }}>
+            <span className="hidden sm:inline">Switch</span>
+          </button>
+          <button onClick={exitPOS}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-all"
+            style={{ color:"#9ca3af", background:"white", borderColor:"#e5e7eb" }}>
+            <LogOut size={11}/>
+            <span className="hidden sm:inline">Exit</span>
+          </button>
+          <button
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all"
+            style={{
+              color: "#ef4444",
+              background: "white",
+              borderColor: "#fecaca",
+            }}
+          >
+            Logout
+          </button>
+        </div>
       </div>
 
-      {/* Two-pane body */}
+      {/* ── Two-pane ─────────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* LEFT — Scanner */}
-        <div className="flex flex-col flex-1 overflow-hidden" style={{ borderRight: "1px solid #e5e7eb" }}>
-          <div className="px-5 py-4 flex-shrink-0"
-            style={{ borderBottom: "1px solid #e5e7eb", background: "white" }}>
+
+        {/* LEFT: scanner */}
+        <div className="flex flex-col flex-1 overflow-hidden" style={{ borderRight:"1px solid #e5e7eb" }}>
+          <div className="px-5 py-3.5 flex-shrink-0" style={{ borderBottom:"1px solid #e5e7eb", background:"white" }}>
             <div className="relative" ref={sugRef}>
               <form onSubmit={handleScan}>
                 <div className="relative flex items-center">
-                  <ScanLine size={16} className="absolute left-4 pointer-events-none"
-                    style={{ color: "var(--brand-orange)" }} />
-                  <input
-                    ref={scanRef} value={query}
-                    onChange={e => setQuery(e.target.value)}
-                    onFocus={() => { if (suggestions.length) setShowSug(true); }}
-                    placeholder="Scan barcode or type to search…"
-                    className="w-full rounded-xl pl-11 pr-10 py-3 text-sm focus:outline-none transition-all"
-                    style={{ background: "#f9fafb", border: "1.5px solid #e5e7eb", color: "#111" }}
-                    autoFocus
-                  />
-                  {query && (
-                    <button type="button"
-                      onClick={() => { setQuery(""); setShowSug(false); scanRef.current?.focus(); }}
-                      className="absolute right-3.5 p-0.5 rounded" style={{ color: "#9ca3af" }}>
-                      <X size={13} />
-                    </button>
+                  <ScanLine size={15} className="absolute left-4 pointer-events-none" style={{ color:"var(--brand-orange)" }} />
+                  <input ref={scanRef} value={query} onChange={e=>setQuery(e.target.value)}
+                    onFocus={()=>{ if(suggestions.length)setShowSug(true); }}
+                    placeholder="Scan barcode or search products…"
+                    className="w-full rounded-xl pl-10 pr-9 py-2.5 text-sm focus:outline-none"
+                    style={{ background:"#f9fafb", border:"1.5px solid #e5e7eb", color:"#111" }} autoFocus />
+                  {query&&(
+                    <button type="button" onClick={()=>{setQuery("");setShowSug(false);scanRef.current?.focus();}}
+                      className="absolute right-3 p-0.5 rounded" style={{ color:"#9ca3af" }}><X size={13}/></button>
                   )}
                 </div>
               </form>
@@ -533,68 +608,50 @@ function POSInner() {
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {!query ? (
-              <div className="flex flex-col items-center justify-center h-full gap-4" style={{ color: "#d1d5db" }}>
-                <div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ background: "#f3f4f6" }}>
-                  <ScanLine size={28} style={{ color: "#d1d5db" }} />
+            {!query?(
+              <div className="flex flex-col items-center justify-center h-full gap-3">
+                <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background:"#f3f4f6" }}>
+                  <ScanLine size={24} style={{ color:"#d1d5db" }} />
                 </div>
                 <div className="text-center">
-                  <p className="text-sm font-semibold" style={{ color: "#9ca3af" }}>Ready to scan</p>
-                  <p className="text-xs mt-1" style={{ color: "#d1d5db" }}>Scan a barcode or type a product name</p>
+                  <p className="text-sm font-semibold" style={{ color:"#9ca3af" }}>Ready to scan</p>
+                  <p className="text-xs mt-0.5" style={{ color:"#d1d5db" }}>Selling from local SQLite stock</p>
                 </div>
               </div>
-            ) : suggestions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full gap-3" style={{ color: "#d1d5db" }}>
-                <Package size={32} style={{ color: "#d1d5db" }} />
-                <p className="text-sm" style={{ color: "#9ca3af" }}>No products found for &ldquo;{query}&rdquo;</p>
+            ):suggestions.length===0?(
+              <div className="flex flex-col items-center justify-center h-full gap-3">
+                <Package size={28} style={{ color:"#d1d5db" }} />
+                <p className="text-sm" style={{ color:"#9ca3af" }}>No products found for &ldquo;{query}&rdquo;</p>
               </div>
-            ) : (
+            ):(
               <div className="p-4 space-y-2">
-                <p className="text-xs font-semibold px-1 mb-3" style={{ color: "#9ca3af" }}>
-                  {suggestions.length} result{suggestions.length > 1 ? "s" : ""}
-                </p>
-                {suggestions.map(item => {
-                  const inCart = cart.find(c => c.eventItemId === item.id);
+                <p className="text-xs font-semibold px-1 mb-2" style={{ color:"#9ca3af" }}>{suggestions.length} result{suggestions.length>1?"s":""}</p>
+                {suggestions.map(item=>{
+                  const inCart=cart.find(r=>r.eventItemId===item.id); const out=Number(item.stock??0)<=0;
                   return (
-                    <button key={item.id} onClick={() => addItem(item)}
-                      className="w-full flex items-center gap-4 p-4 rounded-2xl text-left transition-all"
-                      style={{
-                        background: inCart ? "rgba(255,101,63,0.06)" : "white",
-                        border:     inCart ? "1.5px solid rgba(255,101,63,0.25)" : "1.5px solid #e5e7eb",
-                      }}>
+                    <button key={item.id} onClick={()=>addItem(item)} disabled={out}
+                      className="w-full flex items-center gap-4 p-4 rounded-2xl text-left transition-all disabled:opacity-50"
+                      style={{ background:inCart?"rgba(255,101,63,0.05)":"white", border:inCart?"1.5px solid rgba(255,101,63,0.22)":"1.5px solid #e5e7eb", boxShadow:inCart?"0 1px 6px rgba(255,101,63,0.07)":"0 1px 3px rgba(0,0,0,0.03)" }}>
                       <div className="w-10 h-10 rounded-xl flex items-center justify-center text-sm font-black flex-shrink-0"
-                        style={{ background: inCart ? "rgba(255,101,63,0.12)" : "#f3f4f6", color: inCart ? "var(--brand-orange)" : "#9ca3af" }}>
-                        {item.name.slice(0, 2).toUpperCase()}
+                        style={{ background:inCart?"rgba(255,101,63,0.1)":"#f3f4f6", color:inCart?"var(--brand-orange)":"#9ca3af" }}>
+                        {item.name.slice(0,2).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold truncate" style={{ color: "#111" }}>
+                        <p className="text-sm font-bold truncate" style={{ color:"#111" }}>
                           {item.name}
-                          {item.variantCode && (
-                            <span className="ml-1.5 text-xs font-medium px-1.5 py-0.5 rounded"
-                              style={{ background: "#f3f4f6", color: "#6b7280" }}>
-                              {item.variantCode}
-                            </span>
-                          )}
+                          {item.variantCode&&<span className="ml-1.5 text-xs font-medium px-1.5 py-0.5 rounded" style={{ background:"#f3f4f6", color:"#6b7280" }}>{item.variantCode}</span>}
                         </p>
                         <div className="flex items-center gap-3 mt-0.5">
-                          <span className="text-xs font-mono" style={{ color: "#9ca3af" }}>{item.itemId}</span>
-                          {item.color && <span className="text-xs" style={{ color: "#9ca3af" }}>{item.color}</span>}
-                          <span className="text-xs font-semibold"
-                            style={{ color: item.stock <= 0 ? "#f59e0b" : item.stock <= 5 ? "#f59e0b" : "#16a34a" }}>
-                            {item.stock <= 0 ? `Stock: ${item.stock}` : `${item.stock} left`}
+                          <span className="text-xs font-mono" style={{ color:"#9ca3af" }}>{item.itemId}</span>
+                          {item.color&&<span className="text-xs" style={{ color:"#9ca3af" }}>{item.color}</span>}
+                          <span className="text-xs font-semibold" style={{ color:item.stock<=0?"#ef4444":item.stock<=5?"#f59e0b":"#16a34a" }}>
+                            {item.stock<=0?"Out of stock":`${item.stock} left`}
                           </span>
                         </div>
                       </div>
                       <div className="flex-shrink-0 text-right">
-                        <p className="text-base font-black" style={{ color: "var(--brand-orange)" }}>
-                          {mono(item.netPrice)}
-                        </p>
-                        {inCart && (
-                          <span className="text-[11px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ background: "var(--brand-orange)", color: "white" }}>
-                            ×{inCart.quantity} in cart
-                          </span>
-                        )}
+                        <p className="text-base font-black" style={{ color:"var(--brand-orange)" }}>{money(item.netPrice)}</p>
+                        {inCart&&<span className="text-[11px] font-bold px-2 py-0.5 rounded-full" style={{ background:"var(--brand-orange)", color:"white" }}>×{inCart.quantity} in cart</span>}
                       </div>
                     </button>
                   );
@@ -604,105 +661,82 @@ function POSInner() {
           </div>
         </div>
 
-        {/* RIGHT — Cart/Receipt */}
-        <div className="w-72 xl:w-80 flex flex-col flex-shrink-0" style={{ background: "white" }}>
-          <div className="flex items-center justify-between px-4 py-3.5 flex-shrink-0"
-            style={{ borderBottom: "1px solid #f3f4f6" }}>
-            <p className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>
-              Receipt{itemCount > 0 && <span style={{ color: "var(--brand-orange)" }}> · {itemCount}</span>}
+        {/* RIGHT: cart */}
+        <div className="w-72 xl:w-80 flex flex-col flex-shrink-0" style={{ background:"white" }}>
+          <div className="flex items-center justify-between px-4 py-3 flex-shrink-0" style={{ borderBottom:"1px solid #f3f4f6" }}>
+            <p className="text-xs font-bold uppercase tracking-widest" style={{ color:"#9ca3af" }}>
+              Receipt{itemCount>0&&<span style={{ color:"var(--brand-orange)" }}> · {itemCount}</span>}
             </p>
-            {cart.length > 0 && (
-              <button onClick={() => setCart([])}
-                className="text-[11px] px-2 py-1 rounded-lg"
-                style={{ background: "#fef2f2", color: "#ef4444" }}>
-                Clear
-              </button>
+            {cart.length>0&&(
+              <button onClick={()=>setCart([])} className="text-[11px] px-2 py-1 rounded-lg" style={{ background:"#fef2f2", color:"#ef4444" }}>Clear</button>
             )}
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {cart.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2" style={{ opacity: 0.35 }}>
-                <Package size={28} style={{ color: "#9ca3af" }} />
-                <p className="text-xs" style={{ color: "#9ca3af" }}>Cart is empty</p>
+            {cart.length===0?(
+              <div className="h-full flex flex-col items-center justify-center px-6 text-center">
+                <Package size={28} style={{ color:"#e5e7eb" }} />
+                <p className="text-sm font-semibold mt-2" style={{ color:"#9ca3af" }}>Cart is empty</p>
+                <p className="text-xs mt-1" style={{ color:"#d1d5db" }}>Scan or search to add items</p>
               </div>
-            ) : (
-              <div>
-                {cart.map((item, idx) => (
-                  <div key={item.eventItemId} className="flex items-start gap-2.5 px-4 py-3.5"
-                    style={{ borderBottom: "1px solid #f9fafb" }}>
-                    <span className="text-[10px] font-mono mt-0.5 flex-shrink-0 w-4 text-right" style={{ color: "#d1d5db" }}>
-                      {idx + 1}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-bold leading-snug" style={{ color: "#111" }}>
-                        {item.productName}
-                        {item.variantCode && <span className="ml-1 font-normal" style={{ color: "#6b7280" }}>({item.variantCode})</span>}
-                      </p>
-                      {item.promoApplied && (
-                        <p className="text-[10px] mt-0.5 font-medium" style={{ color: "#16a34a" }}>{item.promoApplied}</p>
-                      )}
-                      {item.discountAmt > 0 ? (
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="text-[10px] line-through" style={{ color: "#d1d5db" }}>{mono(item.unitPrice)}</span>
-                          <span className="text-[10px] font-bold" style={{ color: "#16a34a" }}>{mono(item.finalPrice)}</span>
-                        </div>
-                      ) : (
-                        <p className="text-[10px] mt-0.5" style={{ color: "#9ca3af" }}>{mono(item.unitPrice)}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <button onClick={() => changeQty(item.eventItemId, item.quantity - 1)}
-                        className="w-5 h-5 rounded-md flex items-center justify-center"
-                        style={{ background: "#f3f4f6", color: "#9ca3af" }}>
-                        {item.quantity === 1 ? <Trash2 size={9} /> : <Minus size={9} />}
-                      </button>
-                      <span className="w-6 text-center text-xs font-bold" style={{ color: "#111" }}>{item.quantity}</span>
-                      <button onClick={() => changeQty(item.eventItemId, item.quantity + 1)}
-                        className="w-5 h-5 rounded-md flex items-center justify-center"
-                        style={{ background: "#f3f4f6", color: "#9ca3af" }}>
-                        <Plus size={9} />
+            ):(
+              <div className="p-3 space-y-2">
+                {cart.map(item=>(
+                  <div key={item.eventItemId} className="rounded-xl p-3" style={{ background:"#f9fafb", border:"1px solid #e5e7eb" }}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold truncate" style={{ color:"#111" }}>{item.productName}</p>
+                        <p className="text-xs font-mono mt-0.5" style={{ color:"#9ca3af" }}>{item.itemId}{item.variantCode?` · ${item.variantCode}`:""}</p>
+                      </div>
+                      <button onClick={()=>setCart(p=>p.filter(r=>r.eventItemId!==item.eventItemId))}
+                        className="p-1 rounded-lg flex-shrink-0" style={{ color:"#ef4444", background:"#fee2e2" }}>
+                        <Trash2 size={11}/>
                       </button>
                     </div>
-                    <p className="text-xs font-bold flex-shrink-0 w-20 text-right" style={{ color: "#374151" }}>
-                      {mono(item.finalPrice * item.quantity)}
-                    </p>
+                    <div className="flex items-center justify-between mt-2.5">
+                      <div className="flex items-center gap-1">
+                        <button onClick={()=>changeQty(item.eventItemId,item.quantity-1)} className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background:"#f3f4f6", color:"#374151" }}><Minus size={11}/></button>
+                        <span className="w-7 text-center text-sm font-black" style={{ color:"#111" }}>{item.quantity}</span>
+                        <button onClick={()=>changeQty(item.eventItemId,item.quantity+1)} className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background:"#f3f4f6", color:"#374151" }}><Plus size={11}/></button>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs font-mono" style={{ color:"#9ca3af" }}>{money(item.finalPrice)} each</p>
+                        <p className="text-sm font-black" style={{ color:"#111" }}>{money(item.finalPrice*item.quantity)}</p>
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
 
-          <div className="flex-shrink-0 px-4 py-4" style={{ borderTop: "1px solid #f3f4f6", background: "white" }}>
-            {cart.length > 0 ? (
-              <>
-                <div className="space-y-1.5 mb-4">
-                  {discount > 0 && (
-                    <>
-                      <div className="flex justify-between text-xs">
-                        <span style={{ color: "#9ca3af" }}>Subtotal</span>
-                        <span style={{ color: "#374151" }}>{mono(subtotal)}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span style={{ color: "#16a34a" }}>Discount</span>
-                        <span style={{ color: "#16a34a" }}>−{mono(discount)}</span>
-                      </div>
-                    </>
-                  )}
-                  <div className="flex justify-between items-baseline pt-2" style={{ borderTop: "1px solid #f3f4f6" }}>
-                    <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</span>
-                    <span className="text-2xl font-black" style={{ color: "#111" }}>{mono(total)}</span>
-                  </div>
+          <div className="flex-shrink-0 px-4 py-4 space-y-3" style={{ borderTop:"1px solid #f3f4f6" }}>
+            {cart.length>0&&(
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs"><span style={{color:"#9ca3af"}}>Subtotal</span><span className="font-mono" style={{color:"#374151"}}>{money(subtotal)}</span></div>
+                {discount>0&&<div className="flex justify-between text-xs"><span style={{color:"#16a34a"}}>Discount</span><span className="font-mono" style={{color:"#16a34a"}}>−{money(discount)}</span></div>}
+                <div className="flex justify-between items-baseline pt-1.5" style={{ borderTop:"1px solid #f3f4f6" }}>
+                  <span className="text-xs font-bold uppercase tracking-widest" style={{ color:"#9ca3af" }}>Total</span>
+                  <span className="text-2xl font-black" style={{ color:"#111" }}>{money(total)}</span>
                 </div>
-                <button onClick={() => setScreen("payment")}
-                  className="w-full rounded-xl py-4 text-sm font-black transition-all"
-                  style={{ background: "var(--brand-orange)", color: "white" }}>
-                  Charge {mono(total)}
-                </button>
-              </>
-            ) : (
-              <p className="text-center text-xs py-1" style={{ color: "#d1d5db" }}>Scan or search to add items</p>
+              </div>
             )}
+            <button onClick={()=>setScreen("payment")} disabled={cart.length===0}
+              className="w-full rounded-xl py-3.5 text-sm font-black transition-all disabled:opacity-30"
+              style={{ background:cart.length>0?"var(--brand-orange)":"#f3f4f6", color:cart.length>0?"white":"#9ca3af" }}>
+              {cart.length>0?`Charge ${money(total)}`:"Scan or search to add items"}
+            </button>
+            {pendingSyncCount>0?(
+              <div className="flex items-center gap-2 rounded-xl p-2.5" style={{ background:"#fff7ed" }}>
+                <AlertCircle size={13} className="flex-shrink-0" style={{ color:"#b45309" }} />
+                <p className="text-xs" style={{ color:"#b45309" }}>{pendingSyncCount} sale{pendingSyncCount>1?"s":""} pending sync</p>
+              </div>
+            ):localReady?(
+              <div className="flex items-center gap-2 rounded-xl p-2.5" style={{ background:"#f0fdf4" }}>
+                <Check size={13} style={{ color:"#16a34a" }} />
+                <p className="text-xs" style={{ color:"#16a34a" }}>All sales synced</p>
+              </div>
+            ):null}
           </div>
         </div>
       </div>
@@ -710,12 +744,14 @@ function POSInner() {
   );
 }
 
-// ── Page export — wraps inner in Suspense for useSearchParams ─────────────────
 export default function POSPage() {
   return (
     <Suspense fallback={
-      <div className="h-screen w-screen flex items-center justify-center" style={{ background: "#f8f8f6" }}>
-        <div className="text-sm" style={{ color: "#9ca3af" }}>Loading POS…</div>
+      <div className="h-screen w-screen flex items-center justify-center" style={{ background:"#fafaf8" }}>
+        <div className="flex items-center gap-2" style={{ color:"#9ca3af" }}>
+          <RefreshCw size={16} className="animate-spin"/>
+          <span className="text-sm">Loading POS…</span>
+        </div>
       </div>
     }>
       <POSInner />

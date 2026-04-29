@@ -109,16 +109,24 @@ export const stockEntries = pgTable("stock_entries", {
 });
 
 // ── Transactions ──────────────────────────────────────────────────────────────
+
 export const transactions = pgTable("transactions", {
-  id:          serial("id").primaryKey(),
-  eventId:     integer("event_id").notNull()
+  id: serial("id").primaryKey(),
+
+  eventId: integer("event_id")
+    .notNull()
     .references(() => events.id, { onDelete: "cascade" }),
+
+  clientTxnId: text("client_txn_id").unique(),
+
   totalAmount: numeric("total_amount", { precision: 12, scale: 2 }).notNull(),
-  discount:    numeric("discount",     { precision: 12, scale: 2 }).notNull().default("0"),
+  discount: numeric("discount", { precision: 12, scale: 2 }).notNull().default("0"),
   finalAmount: numeric("final_amount", { precision: 12, scale: 2 }).notNull(),
-  paymentMethod:    text("payment_method"),
+
+  paymentMethod: text("payment_method"),
   paymentReference: text("payment_reference"),
-  createdAt:   timestamp("created_at").defaultNow(),
+
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 // ── Transaction Items ─────────────────────────────────────────────────────────
@@ -159,4 +167,34 @@ export const paymentMethods = pgTable("payment_methods", {
   isActive:    boolean("is_active").notNull().default(true),
   sortOrder:   integer("sort_order").notNull().default(0),
   createdAt:   timestamp("created_at").defaultNow(),
+});
+
+// add this below events table, or near the bottom
+
+export const authUsers = pgTable("auth_users", {
+  id: serial("id").primaryKey(),
+
+  name: text("name").notNull(),
+
+  username: text("username").notNull().unique(),
+
+  passwordHash: text("password_hash").notNull(),
+
+  /**
+   * admin = full dashboard access
+   * user  = event POS access only
+   */
+  role: text("role").notNull().default("user"),
+
+  /**
+   * For normal event users.
+   * Admin can be null.
+   */
+  eventId: integer("event_id").references(() => events.id, {
+    onDelete: "set null",
+  }),
+
+  isActive: boolean("is_active").notNull().default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
 });

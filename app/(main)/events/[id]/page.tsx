@@ -10,9 +10,11 @@ import {
   AlertCircle, Layers, Zap, ToggleLeft, ToggleRight,
   LayoutDashboard, ArrowUpRight, History, ShoppingBag,
   TrendingUp, DollarSign, Activity, RefreshCw,
+  User,
 } from "lucide-react";
 import Link from "next/link";
 import { formatRupiah, formatDate, safeFloat } from "@/lib/utils";
+import { EventUsersPanel } from "@/components/events/EventUsersPanel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type EventRow = {
@@ -65,7 +67,13 @@ type EventStats = {
   };
 };
 
-type Tab = "dashboard" | "items" | "promos" | "stock" | "transactions";
+type Tab =
+  | "dashboard"
+  | "items"
+  | "promos"
+  | "stock"
+  | "transactions"
+  | "users";
 
 // ── Promo type definitions ────────────────────────────────────────────────────
 const PROMO_TYPES = [
@@ -122,6 +130,9 @@ export default function EventDetailPage() {
   const [stats,  setStats]  = useState<EventStats | null>(null);
   const [txns,   setTxns]   = useState<Transaction[]>([]);
   const [tab,    setTab]    = useState<Tab>("dashboard");
+  const [isLocalView, setIsLocalView] = useState(false);
+  const [syncingLocal, setSyncingLocal] = useState(false);
+  const [pendingLocalCount, setPendingLocalCount] = useState(0);
 
   // Item form
   const [showItemForm, setShowItemForm] = useState(false);
@@ -160,20 +171,168 @@ export default function EventDetailPage() {
   const [txnItems,    setTxnItems]    = useState<Record<number, unknown[]>>({});
 
   const load = useCallback(async () => {
-    const [evRes, itemsRes, promosRes, statsRes, txnsRes] = await Promise.all([
-      fetch(`/api/events`).then((r) => r.json()),
-      fetch(`/api/events/${eventId}/products`).then((r) => r.json()),
-      fetch(`/api/events/${eventId}/promos`).then((r) => r.json()),
-      fetch(`/api/events/${eventId}/stats`).then((r) => r.json()),
-      fetch(`/api/events/${eventId}/transactions`).then((r) => r.json()),
-    ]);
-    const ev = (evRes as EventRow[]).find((e) => e.id === eventId) ?? null;
-    setEvent(ev);
-    setItems(itemsRes);
-    setPromos(promosRes);
-    setStats(statsRes);
-    setTxns(txnsRes);
+    /**
+     * 1. Try cloud first.
+     * This is the normal admin/event dashboard data.
+     */
+    try {
+      const [evRes, itemsRes, promosRes, statsRes, txnsRes] = await Promise.all([
+        fetch(`/api/events`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load events");
+          return r.json();
+        }),
+        fetch(`/api/events/${eventId}/products`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load products");
+          return r.json();
+        }),
+        fetch(`/api/events/${eventId}/promos`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load promos");
+          return r.json();
+        }),
+        fetch(`/api/events/${eventId}/stats`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load stats");
+          return r.json();
+        }),
+        fetch(`/api/events/${eventId}/transactions`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load transactions");
+          return r.json();
+        }),
+      ]);
+
+      const ev = (evRes as EventRow[]).find((e) => e.id === eventId) ?? null;
+
+      setEvent(ev);
+      setItems(itemsRes);
+      setPromos(promosRes);
+      setStats(statsRes);
+      setTxns(txnsRes);
+
+      setIsLocalView(false);
+      setPendingLocalCount(0);
+      return;
+    } catch (cloudError) {
+      console.warn("[EventDetailPage] Cloud load failed, trying local SQLite:", cloudError);
+    }
+
+    /**
+     * 2. If cloud fails, fallback to local SQLite.
+     * This lets you still view prepared event data while offline.
+     */
+    try {
+      const [bundle, localStats, localTxns] = await Promise.all([
+        fetch(`/api/local/events/${eventId}/bundle`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Local event is not prepared");
+          return r.json();
+        }),
+        fetch(`/api/local/events/${eventId}/stats`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load local stats");
+          return r.json();
+        }),
+        fetch(`/api/local/events/${eventId}/transactions`, { cache: "no-store" }).then((r) => {
+          if (!r.ok) throw new Error("Failed to load local transactions");
+          return r.json();
+        }),
+      ]);
+
+      const localEvent = bundle.event as EventRow;
+      const localItems = bundle.items as EventItem[];
+
+      /**
+       * Local promos are JSON copies from SQLite.
+       * They may not perfectly match the full Promo type,
+       * but enough for display/count.
+       */
+      const localPromos = Array.isArray(bundle.promos) ? bundle.promos : [];
+
+      const pendingCount = Array.isArray(localTxns)
+        ? localTxns.filter(
+            (txn) => txn.syncStatus === "pending" || txn.syncStatus === "failed"
+          ).length
+        : 0;
+
+      setEvent(localEvent);
+      setItems(localItems);
+      setPromos(localPromos as Promo[]);
+      setTxns(localTxns as Transaction[]);
+
+      setStats({
+        txnCount: Number(localStats.txnCount ?? 0),
+        revenue: Number(localStats.revenue ?? 0),
+        discount: Number(localStats.discount ?? 0),
+        itemsSold: Number(localStats.itemsSold ?? 0),
+        today: {
+          txnCount: Number(localStats.txnCount ?? 0),
+          revenue: Number(localStats.revenue ?? 0),
+          discount: Number(localStats.discount ?? 0),
+          itemsSold: Number(localStats.itemsSold ?? 0),
+        },
+        stock: {
+          totalItems: Number(localStats.totalItems ?? localItems.length),
+          outOfStock: localItems.filter((item) => Number(item.stock) <= 0).length,
+          lowStock: localItems.filter(
+            (item) => Number(item.stock) > 0 && Number(item.stock) <= 5
+          ).length,
+          totalUnits: Number(localStats.totalUnits ?? 0),
+          originalUnits:
+            Number(localStats.totalUnits ?? 0) + Number(localStats.itemsSold ?? 0),
+          totalStockValue: localItems.reduce((sum, item) => {
+            const currentStock = Number(item.stock ?? 0);
+            const netPrice = Number(item.netPrice ?? 0);
+            const soldApprox = 0;
+            return sum + (currentStock + soldApprox) * netPrice;
+          }, 0),
+          remainingValue: localItems.reduce((sum, item) => {
+            return sum + Number(item.stock ?? 0) * Number(item.netPrice ?? 0);
+          }, 0),
+        },
+      });
+
+      setPendingLocalCount(pendingCount);
+      setIsLocalView(true);
+    } catch (localError) {
+      console.error("[EventDetailPage] Local fallback also failed:", localError);
+
+      setEvent(null);
+      setItems([]);
+      setPromos([]);
+      setStats(null);
+      setTxns([]);
+      setPendingLocalCount(0);
+      setIsLocalView(false);
+    }
   }, [eventId]);
+
+  async function syncLocalSales() {
+    setSyncingLocal(true);
+
+    try {
+      const res = await fetch(`/api/local/events/${eventId}/sync`, {
+        method: "POST",
+      });
+
+      const result = await res.json();
+
+      if (!res.ok) {
+        throw new Error(result.error || "Failed to sync local sales");
+      }
+
+      alert(
+        result.failed > 0
+          ? `${result.synced} synced, ${result.failed} failed.`
+          : `${result.synced} local sales synced.`
+      );
+
+      await load();
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Failed to sync local sales"
+      );
+    } finally {
+      setSyncingLocal(false);
+    }
+  }
 
   useEffect(() => { load(); }, [load]);
 
@@ -354,6 +513,11 @@ export default function EventDetailPage() {
     { key: "promos",       label: "Promos",       icon: <Tag size={14} />, count: promos.length },
     { key: "stock",        label: "Stock",        icon: <Activity size={14} /> },
     { key: "transactions", label: "Transactions", icon: <History size={14} />, count: txns.length },
+    {
+      key: "users",
+      label: "Users",
+      icon: <User size={14} />,
+    }
   ];
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -389,6 +553,47 @@ export default function EventDetailPage() {
           <Zap size={14} /> Open POS
         </Link>
       </div>
+      {isLocalView && (
+        <div
+          className="rounded-2xl border px-4 py-3 flex flex-wrap items-center gap-3"
+          style={{
+            background: "rgba(3,105,161,0.08)",
+            borderColor: "rgba(3,105,161,0.20)",
+            color: "#0369a1",
+          }}
+        >
+          <div className="flex-1 min-w-[220px]">
+            <p className="text-sm font-bold">Viewing local SQLite event data</p>
+            <p className="text-xs">
+              This event is loaded from the cashier computer because cloud data is unavailable.
+            </p>
+          </div>
+
+          {pendingLocalCount > 0 && (
+            <span
+              className="text-xs font-bold px-2.5 py-1 rounded-full"
+              style={{
+                background: "rgba(245,158,11,0.15)",
+                color: "#b45309",
+              }}
+            >
+              {pendingLocalCount} sale{pendingLocalCount > 1 ? "s" : ""} pending sync
+            </span>
+          )}
+
+          <button
+            onClick={syncLocalSales}
+            disabled={syncingLocal}
+            className="px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50"
+            style={{
+              background: "#0369a1",
+              color: "white",
+            }}
+          >
+            {syncingLocal ? "Syncing…" : "Sync Local Sales"}
+          </button>
+        </div>
+      )}
 
       {/* ── Tabs ─────────────────────────────────────────────────────────── */}
       <div className="flex gap-1 p-1 rounded-xl overflow-x-auto" style={{ background: "var(--muted)" }}>
@@ -619,7 +824,7 @@ export default function EventDetailPage() {
                 style={ist} />
             </div>
             <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={handleImport} />
-            <button onClick={() => fileRef.current?.click()} disabled={importing}
+            <button onClick={() => fileRef.current?.click()} disabled={importing || isLocalView}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition-all"
               style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
               <Upload size={13} /> {importing ? "Importing…" : "Import"}
@@ -629,7 +834,9 @@ export default function EventDetailPage() {
               style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
               <Download size={13} /> Export
             </a>
-            <button onClick={() => { setItemForm(emptyItem()); setEditItemId(null); setShowItemForm(true); }}
+            <button
+              disabled={isLocalView}
+              onClick={() => { setItemForm(emptyItem()); setEditItemId(null); setShowItemForm(true); }}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold ml-auto"
               style={{ background: "var(--brand-orange)", color: "white" }}>
               <Plus size={14} /> Add Item
@@ -766,7 +973,9 @@ export default function EventDetailPage() {
       {tab === "promos" && (
         <div className="space-y-4">
           <div className="flex justify-end">
-            <button onClick={() => { setPromoForm(emptyPromo()); setEditPromoId(null); setShowPromoForm(true); }}
+            <button
+              disabled={isLocalView}
+              onClick={() => { setPromoForm(emptyPromo()); setEditPromoId(null); setShowPromoForm(true); }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold"
               style={{ background: "var(--brand-orange)", color: "white" }}>
               <Plus size={14} /> New Promo
@@ -913,7 +1122,7 @@ export default function EventDetailPage() {
                       <td className="px-4 py-3">
                         <button
                           onClick={() => handleAddStock(item)}
-                          disabled={savingStock === item.id || !stockAdj[item.id]}
+                          disabled={isLocalView || savingStock === item.id || !stockAdj[item.id]}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all disabled:opacity-40"
                           style={{ background: "var(--brand-orange)", color: "white" }}>
                           {savingStock === item.id ? <RefreshCw size={11} className="animate-spin" /> : <Check size={11} />}
@@ -1011,6 +1220,13 @@ export default function EventDetailPage() {
             )}
           </div>
         </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {/* USERS TAB                                                   */}
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {tab === "users" && (
+        <EventUsersPanel eventId={eventId} />
       )}
 
       {/* ════════════════════════════════════════════════════════════════════ */}

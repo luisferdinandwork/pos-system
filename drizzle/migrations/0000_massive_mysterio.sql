@@ -109,12 +109,14 @@ CREATE TABLE "transaction_items" (
 CREATE TABLE "transactions" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"event_id" integer NOT NULL,
+	"client_txn_id" text,
 	"total_amount" numeric(12, 2) NOT NULL,
 	"discount" numeric(12, 2) DEFAULT '0' NOT NULL,
 	"final_amount" numeric(12, 2) NOT NULL,
 	"payment_method" text,
 	"payment_reference" text,
-	"created_at" timestamp DEFAULT now()
+	"created_at" timestamp DEFAULT now(),
+	CONSTRAINT "transactions_client_txn_id_unique" UNIQUE("client_txn_id")
 );
 --> statement-breakpoint
 ALTER TABLE "event_items" ADD CONSTRAINT "event_items_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

@@ -44,6 +44,8 @@ export default function EventsPage() {
     setSaving(false); setShowForm(false); setForm(empty()); load();
   }
 
+  
+
   async function handleDelete(id: number) {
     if (!confirm("Delete this event and all its products?")) return;
     await fetch(`/api/events?id=${id}`, { method: "DELETE" });
