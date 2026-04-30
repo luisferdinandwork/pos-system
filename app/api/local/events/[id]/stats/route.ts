@@ -23,14 +23,14 @@ export async function GET(
 
     return NextResponse.json(stats);
   } catch (error) {
-    console.error("[LocalStatsRoute] Failed:", error);
+    console.error("[LocalEventStatsRoute] Failed:", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Failed to load local stats",
+            : "Failed to load local event stats",
       },
       { status: 500 }
     );

@@ -243,10 +243,6 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
       const currentStock = Number(localItem.stock ?? 0);
       const nextStock = currentStock - Number(item.quantity);
 
-      if (nextStock < 0) {
-        throw new Error(`${localItem.name} does not have enough stock.`);
-      }
-
       tx.update(localEventItems)
         .set({
           stock: nextStock,
@@ -426,44 +422,88 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
 }
 
 export async function getLocalEventStats(eventId: number) {
-  const txnRow = localDb
-    .select({
-      txnCount: sql<number>`count(${localTransactions.id})`,
-      revenue: sql<number>`coalesce(sum(${localTransactions.finalAmount}), 0)`,
-      discount: sql<number>`coalesce(sum(${localTransactions.discount}), 0)`,
-    })
+  const txns = localDb
+    .select()
     .from(localTransactions)
     .where(eq(localTransactions.eventId, eventId))
-    .get();
+    .all();
 
-  const itemRow = localDb
-    .select({
-      itemsSold: sql<number>`coalesce(sum(${localTransactionItems.quantity}), 0)`,
-    })
-    .from(localTransactionItems)
-    .innerJoin(
-      localTransactions,
-      eq(localTransactionItems.clientTxnId, localTransactions.clientTxnId)
-    )
-    .where(eq(localTransactions.eventId, eventId))
-    .get();
+  const txnIds = txns.map((txn) => txn.clientTxnId);
 
-  const stockRow = localDb
-    .select({
-      totalUnits: sql<number>`coalesce(sum(${localEventItems.stock}), 0)`,
-      totalItems: sql<number>`count(${localEventItems.id})`,
-    })
+  const items =
+    txnIds.length > 0
+      ? localDb
+          .select()
+          .from(localTransactionItems)
+          .where(inArray(localTransactionItems.clientTxnId, txnIds))
+          .all()
+      : [];
+
+  const stockItems = localDb
+    .select()
     .from(localEventItems)
     .where(eq(localEventItems.eventId, eventId))
-    .get();
+    .all();
+
+  const todayPrefix = new Date().toISOString().slice(0, 10);
+  const todayTxns = txns.filter((txn) =>
+    String(txn.createdAt ?? "").startsWith(todayPrefix)
+  );
+
+  const todayTxnIds = todayTxns.map((txn) => txn.clientTxnId);
+
+  const todayItems = items.filter((item) =>
+    todayTxnIds.includes(item.clientTxnId)
+  );
+
+  const txnCount = txns.length;
+  const revenue = txns.reduce(
+    (sum, txn) => sum + Number(txn.finalAmount ?? 0),
+    0
+  );
+  const discount = txns.reduce(
+    (sum, txn) => sum + Number(txn.discount ?? 0),
+    0
+  );
+  const itemsSold = items.reduce(
+    (sum, item) => sum + Number(item.quantity ?? 0),
+    0
+  );
+
+  const todayTxnCount = todayTxns.length;
+  const todayRevenue = todayTxns.reduce(
+    (sum, txn) => sum + Number(txn.finalAmount ?? 0),
+    0
+  );
+  const todayDiscount = todayTxns.reduce(
+    (sum, txn) => sum + Number(txn.discount ?? 0),
+    0
+  );
+  const todayItemsSold = todayItems.reduce(
+    (sum, item) => sum + Number(item.quantity ?? 0),
+    0
+  );
+
+  const totalUnits = stockItems.reduce(
+    (sum, item) => sum + Number(item.stock ?? 0),
+    0
+  );
+
+  const totalItems = stockItems.length;
 
   return {
-    txnCount: toNumber(txnRow?.txnCount),
-    revenue: toNumber(txnRow?.revenue),
-    discount: toNumber(txnRow?.discount),
-    itemsSold: toNumber(itemRow?.itemsSold),
-    totalUnits: toNumber(stockRow?.totalUnits),
-    totalItems: toNumber(stockRow?.totalItems),
+    txnCount,
+    revenue,
+    discount,
+    itemsSold,
+
+    todayTxnCount,
+    todayRevenue,
+    todayDiscount,
+    todayItemsSold,
+
+    totalUnits,
+    totalItems,
   };
 }
 

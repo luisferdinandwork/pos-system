@@ -360,9 +360,9 @@ export async function addStockEntry(
 
     const nextStock = toNumber(item.stock) + quantity;
 
-    if (nextStock < 0) {
-      throw new Error("Stock cannot be negative.");
-    }
+    // if (nextStock < 0) {
+    //   throw new Error("Stock cannot be negative.");
+    // }
 
     const [entry] = await tx
       .insert(stockEntries)
@@ -393,22 +393,40 @@ export async function addStockEntry(
 export async function deductStock(
   eventItemId: number,
   quantity: number,
-  transactionId: number
-): Promise<void> {
-  if (!Number.isFinite(eventItemId)) {
-    throw new Error("Invalid event item ID.");
+  referenceId?: number | null
+) {
+  const [item] = await db
+    .select()
+    .from(eventItems)
+    .where(eq(eventItems.id, eventItemId))
+    .limit(1);
+
+  if (!item) {
+    throw new Error("Event item not found.");
   }
 
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("Quantity must be greater than zero.");
-  }
+  const currentStock = Number(item.stock ?? 0);
+  const nextStock = currentStock - Number(quantity);
 
-  await addStockEntry(
+  const [updated] = await db
+    .update(eventItems)
+    .set({
+      stock: nextStock,
+    })
+    .where(eq(eventItems.id, eventItemId))
+    .returning();
+
+  await db.insert(stockEntries).values({
     eventItemId,
-    -quantity,
-    `Sale #${transactionId}`,
-    "sale"
-  );
+    quantity: -Math.abs(Number(quantity)),
+    note: referenceId
+      ? `Sale transaction #${referenceId}`
+      : "Sale deduction",
+    source: "sale",
+    createdAt: new Date(),
+  });
+
+  return updated;
 }
 
 /**
