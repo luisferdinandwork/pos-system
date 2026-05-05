@@ -52,20 +52,14 @@ export const localPromos = sqliteTable("local_promos", {
 });
 
 export const localTransactions = sqliteTable("local_transactions", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-
   clientTxnId: text("client_txn_id").notNull().unique(),
   eventId: integer("event_id").notNull(),
-
   totalAmount: text("total_amount").notNull(),
   discount: text("discount").notNull().default("0"),
   finalAmount: text("final_amount").notNull(),
-
   paymentMethod: text("payment_method").notNull(),
   paymentReference: text("payment_reference"),
-
   createdAt: text("created_at").notNull(),
-
   syncStatus: text("sync_status").notNull().default("pending"),
   serverTransactionId: integer("server_transaction_id"),
   syncError: text("sync_error"),

@@ -584,3 +584,82 @@ export async function getLocalPreparedEventsState() {
     events: eventsWithPending,
   };
 }
+
+export function getLocalPendingSyncCount(eventId: number) {
+  const row = localDb
+    .select({
+      count: sql<number>`count(${localTransactions.id})`,
+    })
+    .from(localTransactions)
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        inArray(localTransactions.syncStatus, ["pending", "failed"])
+      )
+    )
+    .get();
+
+  return Number(row?.count ?? 0);
+}
+
+export function deleteLocalEventData(
+  eventId: number,
+  options?: {
+    force?: boolean;
+  }
+) {
+  const force = options?.force ?? false;
+  const pendingCount = getLocalPendingSyncCount(eventId);
+
+  if (pendingCount > 0 && !force) {
+    throw new Error(
+      `This local POS still has ${pendingCount} unsynced sale${
+        pendingCount > 1 ? "s" : ""
+      }. Sync first or use force delete.`
+    );
+  }
+
+  const txns = localDb
+    .select({
+      clientTxnId: localTransactions.clientTxnId,
+    })
+    .from(localTransactions)
+    .where(eq(localTransactions.eventId, eventId))
+    .all();
+
+  const clientTxnIds = txns.map((txn) => txn.clientTxnId);
+
+  localDb.transaction((tx) => {
+    if (clientTxnIds.length > 0) {
+      tx.delete(localTransactionItems)
+        .where(inArray(localTransactionItems.clientTxnId, clientTxnIds))
+        .run();
+    }
+
+    tx.delete(localTransactions)
+      .where(eq(localTransactions.eventId, eventId))
+      .run();
+
+    tx.delete(localPromos)
+      .where(eq(localPromos.eventId, eventId))
+      .run();
+
+    tx.delete(localEventItems)
+      .where(eq(localEventItems.eventId, eventId))
+      .run();
+
+    tx.delete(localSyncLogs)
+      .where(eq(localSyncLogs.eventId, eventId))
+      .run();
+
+    tx.delete(localEvents)
+      .where(eq(localEvents.id, eventId))
+      .run();
+  });
+
+  return {
+    success: true,
+    eventId,
+    deletedClientTransactions: clientTxnIds.length,
+  };
+}

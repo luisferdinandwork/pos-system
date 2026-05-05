@@ -1,6 +1,6 @@
-// app/api/events/[id]/stock/import/route.ts
+// app/api/events/[id]/stock/transfer-out/import/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { importStockFromExcel } from "@/lib/export-excel";
+import { importTransferOutFromExcel } from "@/lib/export-excel";
 import { getAllEvents } from "@/lib/events";
 
 export async function POST(
@@ -31,7 +31,7 @@ export async function POST(
   const arrayBuffer = await file.arrayBuffer();
   const data = new Uint8Array(arrayBuffer);
 
-  const result = await importStockFromExcel(data, eventId, event.name);
+  const result = await importTransferOutFromExcel(data, eventId, event.name);
 
   return NextResponse.json(result);
 }

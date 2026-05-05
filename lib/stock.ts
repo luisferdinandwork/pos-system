@@ -1,14 +1,20 @@
 // lib/stock.ts
 import { db } from "@/lib/db";
 import {
-  stockEntries,
   eventItems,
-  transactions,
-  transactionItems,
+  stockTransactions,
+  stockTransactionTypes,
 } from "@/lib/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 
-export type StockEntry = typeof stockEntries.$inferSelect;
+export type StockTransaction = typeof stockTransactions.$inferSelect;
+export type StockTransactionType = typeof stockTransactionTypes.$inferSelect;
+
+export type StockTransactionTypeCode =
+  | "transfer_in"
+  | "transfer_out"
+  | "sale"
+  | "adjustment";
 
 export type StockSummary = {
   totalItems: number;
@@ -16,39 +22,25 @@ export type StockSummary = {
   lowStock: number;
 
   /**
-   * Current remaining stock.
-   * Source: event_items.stock
+   * Current stock now.
+   * This can be negative.
    */
   totalUnits: number;
 
   /**
-   * Units already sold.
-   * Source: transaction_items.quantity
+   * Units sold through sale stock transactions.
    */
   soldUnits: number;
 
   /**
-   * Used by your existing dashboard as the sales denominator.
-   * New proper logic:
-   * originalUnits = current remaining stock + sold units
+   * totalUnits + soldUnits.
+   * This is useful for dashboard comparison:
+   * sold vs total received/available.
    */
   originalUnits: number;
-
-  /**
-   * Clearer alias for originalUnits.
-   */
   totalAvailableUnits: number;
 
-  /**
-   * Current remaining inventory value.
-   * Formula: current stock × net price
-   */
   remainingValue: number;
-
-  /**
-   * Total inventory value that has been available for sale.
-   * Formula: remaining value + sold inventory value
-   */
   totalStockValue: number;
 };
 
@@ -56,31 +48,150 @@ export type EventInventorySummary = StockSummary & {
   eventId: number;
 };
 
+export const DEFAULT_STOCK_TRANSACTION_TYPES = [
+  {
+    code: "transfer_in",
+    name: "Transfer In",
+    defaultDirection: 1,
+  },
+  {
+    code: "transfer_out",
+    name: "Transfer Out",
+    defaultDirection: -1,
+  },
+  {
+    code: "sale",
+    name: "Sale",
+    defaultDirection: -1,
+  },
+  {
+    code: "adjustment",
+    name: "Adjustment",
+    defaultDirection: 0,
+  },
+] as const;
+
+type StockDbExecutor = typeof db | any;
+
 function toNumber(value: unknown): number {
   const num = Number(value ?? 0);
   return Number.isFinite(num) ? num : 0;
 }
 
-// ── Read ──────────────────────────────────────────────────────────────────────
+function normalizeStockQuantity(
+  typeCode: StockTransactionTypeCode,
+  quantity: number
+): number {
+  if (!Number.isFinite(quantity) || quantity === 0) {
+    throw new Error("Quantity must not be zero.");
+  }
+
+  if (typeCode === "transfer_in") {
+    return Math.abs(quantity);
+  }
+
+  if (typeCode === "transfer_out" || typeCode === "sale") {
+    return -Math.abs(quantity);
+  }
+
+  /**
+   * Adjustment can be positive or negative.
+   */
+  return quantity;
+}
+
+function isStockTransactionTypeCode(
+  value: string
+): value is StockTransactionTypeCode {
+  return (
+    value === "transfer_in" ||
+    value === "transfer_out" ||
+    value === "sale" ||
+    value === "adjustment"
+  );
+}
+
+// ── Setup ───────────────────────────────────────────────────────────────────
+
+export async function seedDefaultStockTransactionTypes() {
+  for (const type of DEFAULT_STOCK_TRANSACTION_TYPES) {
+    const [existing] = await db
+      .select()
+      .from(stockTransactionTypes)
+      .where(eq(stockTransactionTypes.code, type.code))
+      .limit(1);
+
+    if (existing) continue;
+
+    await db.insert(stockTransactionTypes).values({
+      code: type.code,
+      name: type.name,
+      defaultDirection: type.defaultDirection,
+      isSystem: true,
+    });
+  }
+}
 
 /**
- * Get the current stock level for a single event item.
- * Reads from the denormalized `stock` column on event_items for speed.
+ * Safe resolver.
+ * If the type is missing, it creates it.
+ * This prevents sync from failing because stock types were not seeded yet.
  */
+export async function getOrCreateStockTransactionTypeByCode(
+  code: StockTransactionTypeCode,
+  executor: StockDbExecutor = db
+): Promise<StockTransactionType> {
+  const [existing] = await executor
+    .select()
+    .from(stockTransactionTypes)
+    .where(eq(stockTransactionTypes.code, code))
+    .limit(1);
+
+  if (existing) return existing;
+
+  const defaultType = DEFAULT_STOCK_TRANSACTION_TYPES.find(
+    (type) => type.code === code
+  );
+
+  if (!defaultType) {
+    throw new Error(`Unknown stock transaction type "${code}".`);
+  }
+
+  const [created] = await executor
+    .insert(stockTransactionTypes)
+    .values({
+      code: defaultType.code,
+      name: defaultType.name,
+      defaultDirection: defaultType.defaultDirection,
+      isSystem: true,
+    })
+    .returning();
+
+  return created;
+}
+
+export async function getStockTransactionTypeByCode(
+  code: string
+): Promise<StockTransactionType> {
+  if (!isStockTransactionTypeCode(code)) {
+    throw new Error(`Invalid stock transaction type "${code}".`);
+  }
+
+  return getOrCreateStockTransactionTypeByCode(code);
+}
+
+// ── Read ────────────────────────────────────────────────────────────────────
+
 export async function getStockForEventItem(eventItemId: number): Promise<number> {
-  const r = await db
+  const [row] = await db
     .select({ stock: eventItems.stock })
     .from(eventItems)
     .where(eq(eventItems.id, eventItemId))
     .limit(1);
 
-  return toNumber(r[0]?.stock);
+  return toNumber(row?.stock);
 }
 
-/**
- * Get stock levels for all items in an event.
- * Returns a map of { eventItemId → stockLevel }.
- */
 export async function getStockLevelsForEvent(
   eventId: number
 ): Promise<Record<number, number>> {
@@ -92,15 +203,9 @@ export async function getStockLevelsForEvent(
     .from(eventItems)
     .where(eq(eventItems.eventId, eventId));
 
-  return Object.fromEntries(
-    rows.map((row) => [row.id, toNumber(row.stock)])
-  );
+  return Object.fromEntries(rows.map((row) => [row.id, toNumber(row.stock)]));
 }
 
-/**
- * Get all event items for a specific event with their current stock.
- * Used by the per-event stock management tab.
- */
 export async function getItemsWithStockForEvent(eventId: number) {
   return db
     .select()
@@ -109,38 +214,233 @@ export async function getItemsWithStockForEvent(eventId: number) {
     .orderBy(eventItems.name);
 }
 
-/**
- * Get the full stock_entries history for one event item.
- */
 export async function getStockHistory(
   eventItemId: number
-): Promise<StockEntry[]> {
+): Promise<StockTransaction[]> {
   return db
     .select()
-    .from(stockEntries)
-    .where(eq(stockEntries.eventItemId, eventItemId))
-    .orderBy(sql`${stockEntries.createdAt} desc`);
+    .from(stockTransactions)
+    .where(eq(stockTransactions.eventItemId, eventItemId))
+    .orderBy(sql`${stockTransactions.createdAt} desc`);
+}
+
+export async function assertEventItemBelongsToEvent(
+  eventId: number,
+  eventItemId: number
+) {
+  const [item] = await db
+    .select({
+      id: eventItems.id,
+      eventId: eventItems.eventId,
+    })
+    .from(eventItems)
+    .where(and(eq(eventItems.id, eventItemId), eq(eventItems.eventId, eventId)))
+    .limit(1);
+
+  if (!item) {
+    throw new Error("Item does not belong to this event.");
+  }
+
+  return item;
+}
+
+// ── Write ───────────────────────────────────────────────────────────────────
+
+type AddStockTransactionInput = {
+  eventItemId: number;
+  typeCode: StockTransactionTypeCode;
+  quantity: number;
+  note?: string | null;
+
+  /**
+   * Optional relation to a transaction.
+   * For sale sync, pass transactionId.
+   */
+  transactionId?: number | null;
+
+  /**
+   * Optional generic reference fields.
+   */
+  referenceType?: string | null;
+  referenceId?: number | null;
+
+  /**
+   * Optional date.
+   * Use Date, not string, for timestamp columns.
+   */
+  createdAt?: Date | string | null;
+};
+
+async function addStockTransactionWithExecutor(
+  executor: StockDbExecutor,
+  input: AddStockTransactionInput
+): Promise<StockTransaction> {
+  if (!Number.isFinite(input.eventItemId)) {
+    throw new Error("eventItemId is required.");
+  }
+
+  const signedQuantity = normalizeStockQuantity(
+    input.typeCode,
+    Number(input.quantity)
+  );
+
+  const type = await getOrCreateStockTransactionTypeByCode(
+    input.typeCode,
+    executor
+  );
+
+  /**
+   * Lock row to avoid two stock updates reading the same value.
+   * Works on Postgres.
+   */
+  const [item] = await executor
+    .select()
+    .from(eventItems)
+    .where(eq(eventItems.id, input.eventItemId))
+    .for("update")
+    .limit(1);
+
+  if (!item) {
+    throw new Error(`Event item ${input.eventItemId} not found.`);
+  }
+
+  const stockBefore = toNumber(item.stock);
+  const stockAfter = stockBefore + signedQuantity;
+
+  /**
+   * IMPORTANT:
+   * No guard against stockAfter < 0.
+   * Your POS allows negative stock.
+   */
+
+  const createdAt =
+    input.createdAt instanceof Date
+      ? input.createdAt
+      : input.createdAt
+        ? new Date(input.createdAt)
+        : new Date();
+
+  const referenceType =
+    input.referenceType ??
+    (input.transactionId ? "transaction" : input.typeCode);
+
+  const referenceId = input.referenceId ?? input.transactionId ?? null;
+
+  const [entry] = await executor
+    .insert(stockTransactions)
+    .values({
+      eventItemId: input.eventItemId,
+      typeId: type.id,
+      quantity: signedQuantity,
+
+      stockBefore,
+      stockAfter,
+
+      transactionId: input.transactionId ?? null,
+
+      referenceType,
+      referenceId,
+
+      note: input.note ?? null,
+      createdAt,
+    })
+    .returning();
+
+  await executor
+    .update(eventItems)
+    .set({
+      stock: stockAfter,
+    })
+    .where(eq(eventItems.id, input.eventItemId));
+
+  return entry;
 }
 
 /**
- * Get aggregated stock stats for one event.
+ * Public function.
  *
- * Important logic:
- * - totalUnits = current remaining stock
- * - soldUnits = units sold in transactions
- * - originalUnits = current remaining stock + sold units
+ * If you call it normally:
+ *   await addStockTransaction(...)
  *
- * This makes restock correctly increase the denominator
- * used in "sold / total stock" dashboard stats.
+ * It creates its own db transaction.
+ *
+ * If you call it from createTransaction() inside tx:
+ *   await addStockTransaction(..., tx)
+ *
+ * It reuses the existing transaction, so FK to transactions.id works.
  */
+export async function addStockTransaction(
+  input: AddStockTransactionInput,
+  executor?: StockDbExecutor
+): Promise<StockTransaction> {
+  if (executor) {
+    return addStockTransactionWithExecutor(executor, input);
+  }
+
+  return db.transaction(async (tx) => {
+    return addStockTransactionWithExecutor(tx, input);
+  });
+}
+
+/**
+ * Used by transaction creation.
+ * Must be called with tx from createTransaction().
+ */
+export async function deductStock(
+  eventItemId: number,
+  quantity: number,
+  transactionId?: number | null,
+  executor?: StockDbExecutor
+) {
+  return addStockTransaction(
+    {
+      eventItemId,
+      typeCode: "sale",
+      quantity: -Math.abs(Number(quantity)),
+      transactionId: transactionId ?? null,
+      referenceType: "transaction",
+      referenceId: transactionId ?? null,
+      note: transactionId
+        ? `Sale transaction #${transactionId}`
+        : "Sale transaction",
+    },
+    executor
+  );
+}
+
+/**
+ * Compatibility helper if old code still imports addStockEntry.
+ */
+export async function addStockEntry(
+  eventItemId: number,
+  quantity: number,
+  note?: string | null,
+  source?: string | null
+) {
+  const typeCode: StockTransactionTypeCode =
+    source === "import"
+      ? "transfer_in"
+      : source === "sale"
+        ? "sale"
+        : "adjustment";
+
+  return addStockTransaction({
+    eventItemId,
+    typeCode,
+    quantity,
+    note: note ?? null,
+    referenceType: source ?? typeCode,
+  });
+}
+
+// ── Summaries ───────────────────────────────────────────────────────────────
+
 export async function getStockSummaryForEvent(
   eventId: number
 ): Promise<StockSummary> {
   const [stockRow] = await db
     .select({
-      totalItems: sql<number>`
-        count(${eventItems.id})
-      `,
+      totalItems: sql<number>`count(${eventItems.id})`,
 
       outOfStock: sql<number>`
         coalesce(
@@ -170,23 +470,25 @@ export async function getStockSummaryForEvent(
   const [soldRow] = await db
     .select({
       soldUnits: sql<number>`
-        coalesce(sum(${transactionItems.quantity}), 0)
+        coalesce(sum(abs(${stockTransactions.quantity})), 0)
       `,
 
       soldStockValue: sql<number>`
-        coalesce(sum(${transactionItems.quantity} * ${eventItems.netPrice}::numeric), 0)
+        coalesce(sum(abs(${stockTransactions.quantity}) * ${eventItems.netPrice}::numeric), 0)
       `,
     })
-    .from(transactionItems)
+    .from(stockTransactions)
+    .innerJoin(eventItems, eq(stockTransactions.eventItemId, eventItems.id))
     .innerJoin(
-      transactions,
-      eq(transactionItems.transactionId, transactions.id)
+      stockTransactionTypes,
+      eq(stockTransactions.typeId, stockTransactionTypes.id)
     )
-    .innerJoin(
-      eventItems,
-      eq(transactionItems.eventItemId, eventItems.id)
-    )
-    .where(eq(transactions.eventId, eventId));
+    .where(
+      and(
+        eq(eventItems.eventId, eventId),
+        eq(stockTransactionTypes.code, "sale")
+      )
+    );
 
   const totalUnits = toNumber(stockRow?.totalUnits);
   const soldUnits = toNumber(soldRow?.soldUnits);
@@ -213,19 +515,14 @@ export async function getStockSummaryForEvent(
   };
 }
 
-/**
- * Cross-event inventory summary for the parent dashboard.
- *
- * Same logic as getStockSummaryForEvent, but grouped by event.
- */
-export async function getInventorySummaryForAllEvents(): Promise<EventInventorySummary[]> {
+export async function getInventorySummaryForAllEvents(): Promise<
+  EventInventorySummary[]
+> {
   const stockRows = await db
     .select({
       eventId: eventItems.eventId,
 
-      totalItems: sql<number>`
-        count(${eventItems.id})
-      `,
+      totalItems: sql<number>`count(${eventItems.id})`,
 
       outOfStock: sql<number>`
         coalesce(
@@ -241,9 +538,7 @@ export async function getInventorySummaryForAllEvents(): Promise<EventInventoryS
         )
       `,
 
-      totalUnits: sql<number>`
-        coalesce(sum(${eventItems.stock}), 0)
-      `,
+      totalUnits: sql<number>`coalesce(sum(${eventItems.stock}), 0)`,
 
       remainingValue: sql<number>`
         coalesce(sum(${eventItems.stock} * ${eventItems.netPrice}::numeric), 0)
@@ -254,60 +549,48 @@ export async function getInventorySummaryForAllEvents(): Promise<EventInventoryS
 
   const soldRows = await db
     .select({
-      eventId: transactions.eventId,
+      eventId: eventItems.eventId,
 
       soldUnits: sql<number>`
-        coalesce(sum(${transactionItems.quantity}), 0)
+        coalesce(sum(abs(${stockTransactions.quantity})), 0)
       `,
 
       soldStockValue: sql<number>`
-        coalesce(sum(${transactionItems.quantity} * ${eventItems.netPrice}::numeric), 0)
+        coalesce(sum(abs(${stockTransactions.quantity}) * ${eventItems.netPrice}::numeric), 0)
       `,
     })
-    .from(transactionItems)
+    .from(stockTransactions)
+    .innerJoin(eventItems, eq(stockTransactions.eventItemId, eventItems.id))
     .innerJoin(
-      transactions,
-      eq(transactionItems.transactionId, transactions.id)
+      stockTransactionTypes,
+      eq(stockTransactions.typeId, stockTransactionTypes.id)
     )
-    .innerJoin(
-      eventItems,
-      eq(transactionItems.eventItemId, eventItems.id)
-    )
-    .groupBy(transactions.eventId);
+    .where(eq(stockTransactionTypes.code, "sale"))
+    .groupBy(eventItems.eventId);
 
-  const soldMap = new Map(
-    soldRows.map((row) => [
-      Number(row.eventId),
-      {
-        soldUnits: toNumber(row.soldUnits),
-        soldStockValue: toNumber(row.soldStockValue),
-      },
-    ])
-  );
+  const soldMap = new Map(soldRows.map((row) => [row.eventId, row]));
 
   return stockRows.map((row) => {
-    const eventId = Number(row.eventId);
-
-    const sold = soldMap.get(eventId) ?? {
-      soldUnits: 0,
-      soldStockValue: 0,
-    };
+    const sold = soldMap.get(row.eventId);
 
     const totalUnits = toNumber(row.totalUnits);
-    const remainingValue = toNumber(row.remainingValue);
+    const soldUnits = toNumber(sold?.soldUnits);
 
-    const totalAvailableUnits = totalUnits + sold.soldUnits;
-    const totalStockValue = remainingValue + sold.soldStockValue;
+    const remainingValue = toNumber(row.remainingValue);
+    const soldStockValue = toNumber(sold?.soldStockValue);
+
+    const totalAvailableUnits = totalUnits + soldUnits;
+    const totalStockValue = remainingValue + soldStockValue;
 
     return {
-      eventId,
+      eventId: row.eventId,
 
       totalItems: toNumber(row.totalItems),
       outOfStock: toNumber(row.outOfStock),
       lowStock: toNumber(row.lowStock),
 
       totalUnits,
-      soldUnits: sold.soldUnits,
+      soldUnits,
 
       originalUnits: totalAvailableUnits,
       totalAvailableUnits,
@@ -316,189 +599,4 @@ export async function getInventorySummaryForAllEvents(): Promise<EventInventoryS
       totalStockValue,
     };
   });
-}
-
-// ── Write ─────────────────────────────────────────────────────────────────────
-
-/**
- * Add stock manually or through import.
- *
- * This function:
- * 1. Writes stock_entries history.
- * 2. Updates event_items.stock.
- *
- * Important:
- * eventItems.stock is what POS/dashboard reads as current stock.
- */
-export async function addStockEntry(
-  eventItemId: number,
-  quantity: number,
-  note: string,
-  source: "manual" | "import" | "sale" = "manual"
-): Promise<StockEntry> {
-  if (!Number.isFinite(eventItemId)) {
-    throw new Error("Invalid event item ID.");
-  }
-
-  if (!Number.isFinite(quantity) || quantity === 0) {
-    throw new Error("Quantity must not be zero.");
-  }
-
-  return db.transaction(async (tx) => {
-    const [item] = await tx
-      .select({
-        id: eventItems.id,
-        stock: eventItems.stock,
-      })
-      .from(eventItems)
-      .where(eq(eventItems.id, eventItemId))
-      .limit(1);
-
-    if (!item) {
-      throw new Error("Event item not found.");
-    }
-
-    const nextStock = toNumber(item.stock) + quantity;
-
-    // if (nextStock < 0) {
-    //   throw new Error("Stock cannot be negative.");
-    // }
-
-    const [entry] = await tx
-      .insert(stockEntries)
-      .values({
-        eventItemId,
-        quantity,
-        note,
-        source,
-      })
-      .returning();
-
-    await tx
-      .update(eventItems)
-      .set({
-        stock: nextStock,
-      })
-      .where(eq(eventItems.id, eventItemId));
-
-    return entry;
-  });
-}
-
-/**
- * Deduct stock after a completed sale.
- *
- * This is used by createTransaction().
- */
-export async function deductStock(
-  eventItemId: number,
-  quantity: number,
-  referenceId?: number | null
-) {
-  const [item] = await db
-    .select()
-    .from(eventItems)
-    .where(eq(eventItems.id, eventItemId))
-    .limit(1);
-
-  if (!item) {
-    throw new Error("Event item not found.");
-  }
-
-  const currentStock = Number(item.stock ?? 0);
-  const nextStock = currentStock - Number(quantity);
-
-  const [updated] = await db
-    .update(eventItems)
-    .set({
-      stock: nextStock,
-    })
-    .where(eq(eventItems.id, eventItemId))
-    .returning();
-
-  await db.insert(stockEntries).values({
-    eventItemId,
-    quantity: -Math.abs(Number(quantity)),
-    note: referenceId
-      ? `Sale transaction #${referenceId}`
-      : "Sale deduction",
-    source: "sale",
-    createdAt: new Date(),
-  });
-
-  return updated;
-}
-
-/**
- * Snapshot stock at event close.
- */
-export async function snapshotEventStock(eventId: number): Promise<void> {
-  const items = await db
-    .select({
-      id: eventItems.id,
-      stock: eventItems.stock,
-    })
-    .from(eventItems)
-    .where(eq(eventItems.eventId, eventId));
-
-  for (const item of items) {
-    await db.insert(stockEntries).values({
-      eventItemId: item.id,
-      quantity: 0,
-      note: `Event closed — stock snapshot: ${item.stock}`,
-      source: "manual",
-    });
-  }
-}
-
-/**
- * Recompute event_items.stock from stock_entries.
- *
- * Use this only if the denormalized stock column becomes inconsistent.
- */
-export async function recalcStock(eventItemId: number): Promise<number> {
-  const [row] = await db
-    .select({
-      total: sql<number>`
-        coalesce(sum(${stockEntries.quantity}), 0)
-      `,
-    })
-    .from(stockEntries)
-    .where(eq(stockEntries.eventItemId, eventItemId));
-
-  const total = toNumber(row?.total);
-
-  await db
-    .update(eventItems)
-    .set({
-      stock: total,
-    })
-    .where(eq(eventItems.id, eventItemId));
-
-  return total;
-}
-
-/**
- * Optional helper to validate event ownership before stock changes.
- */
-export async function assertEventItemBelongsToEvent(
-  eventId: number,
-  eventItemId: number
-): Promise<void> {
-  const [item] = await db
-    .select({
-      id: eventItems.id,
-    })
-    .from(eventItems)
-    .where(
-      and(
-        eq(eventItems.id, eventItemId),
-        eq(eventItems.eventId, eventId)
-      )
-    )
-    .limit(1);
-
-  if (!item) {
-    throw new Error("Item does not belong to this event.");
-  }
 }

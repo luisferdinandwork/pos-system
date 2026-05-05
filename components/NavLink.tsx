@@ -121,22 +121,22 @@ export default function NavLinks() {
 
       <div className="px-3 pb-4">
         <button
-          onClick={() => router.push("/pos")}
+          onClick={() => router.push("/pos?select=1")}
           className="w-full flex items-center justify-center gap-2.5 rounded-xl py-3 text-sm font-bold transition-all duration-150 group"
           style={{
-            background:  "var(--brand-orange)",
-            color:       "white",
-            boxShadow:   "0 4px 14px rgba(255,101,63,0.35)",
+            background: "var(--brand-orange)",
+            color: "white",
+            boxShadow: "0 4px 14px rgba(255,101,63,0.35)",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background  = "#ff7043";
-            e.currentTarget.style.boxShadow   = "0 6px 20px rgba(255,101,63,0.5)";
-            e.currentTarget.style.transform   = "translateY(-1px)";
+            e.currentTarget.style.background = "#ff7043";
+            e.currentTarget.style.boxShadow = "0 6px 20px rgba(255,101,63,0.5)";
+            e.currentTarget.style.transform = "translateY(-1px)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.background  = "var(--brand-orange)";
-            e.currentTarget.style.boxShadow   = "0 4px 14px rgba(255,101,63,0.35)";
-            e.currentTarget.style.transform   = "translateY(0)";
+            e.currentTarget.style.background = "var(--brand-orange)";
+            e.currentTarget.style.boxShadow = "0 4px 14px rgba(255,101,63,0.35)";
+            e.currentTarget.style.transform = "translateY(0)";
           }}
         >
           <Zap size={15} strokeWidth={2.5} />

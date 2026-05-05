@@ -5,7 +5,8 @@ import { sql } from "drizzle-orm";
 import {
   events,
   eventItems,
-  stockEntries,
+  stockTransactionTypes,
+  stockTransactions,
   transactions,
   transactionItems,
   payments,
@@ -227,6 +228,13 @@ const BASE_ITEMS: SeedItem[] = [
   },
 ];
 
+const STOCK_TRANSACTION_TYPES = [
+  { code: "transfer_in", name: "Transfer In", defaultDirection: 1 },
+  { code: "transfer_out", name: "Transfer Out", defaultDirection: -1 },
+  { code: "sale", name: "Sale", defaultDirection: -1 },
+  { code: "adjustment", name: "Adjustment", defaultDirection: 0 },
+];
+
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -290,7 +298,8 @@ async function resetSeedData() {
   await db.delete(payments);
   await db.delete(transactionItems);
   await db.delete(transactions);
-  await db.delete(stockEntries);
+  await db.delete(stockTransactions);
+  await db.delete(stockTransactionTypes);
   await db.delete(eventItems);
   await db.delete(events);
   await db.delete(paymentMethods);
@@ -306,7 +315,25 @@ async function seedPaymentMethods() {
   console.log(`   ✅ ${PAYMENT_METHODS.length} payment methods inserted.\n`);
 }
 
-async function seedEventsAndSales() {
+async function seedStockTransactionTypes() {
+  console.log("🌱 Seeding stock transaction types...");
+
+  const inserted = await db
+    .insert(stockTransactionTypes)
+    .values(
+      STOCK_TRANSACTION_TYPES.map((type) => ({
+        ...type,
+        isSystem: true,
+      }))
+    )
+    .returning();
+
+  console.log(`   ✅ ${inserted.length} stock transaction types inserted.\n`);
+
+  return Object.fromEntries(inserted.map((type) => [type.code, type.id]));
+}
+
+async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
   console.log("🌱 Seeding events, items, stock, and transactions...\n");
 
   for (const seedEvent of SEED_EVENTS) {
@@ -363,12 +390,15 @@ async function seedEventsAndSales() {
       .values(eventItemRows)
       .returning();
 
-    await db.insert(stockEntries).values(
+    await db.insert(stockTransactions).values(
       insertedItems.map((item) => ({
         eventItemId: item.id,
-        quantity: item.stock,
+        typeId: stockTypeIds.transfer_in,
+        quantity: Number(item.stock),
+        stockBefore: 0,
+        stockAfter: Number(item.stock),
         note: "Initial seeded stock",
-        source: "import",
+        referenceType: "seed",
       }))
     );
 
@@ -464,14 +494,24 @@ async function seedEventsAndSales() {
         paidAt: createdAt,
       });
 
-      await db.insert(stockEntries).values(
-        lines.map((line) => ({
-          eventItemId: line.item.id,
-          quantity: -line.quantity,
-          note: `Sale #${txn.id}`,
-          source: "sale",
-          createdAt,
-        }))
+      await db.insert(stockTransactions).values(
+        lines.map((line) => {
+          const stockAfter = Number(line.item.stock);
+          const stockBefore = stockAfter + Number(line.quantity);
+
+          return {
+            eventItemId: line.item.id,
+            typeId: stockTypeIds.sale,
+            quantity: -Math.abs(Number(line.quantity)),
+            stockBefore,
+            stockAfter,
+            transactionId: txn.id,
+            note: `Sale #${txn.id}`,
+            referenceType: "transaction",
+            referenceId: String(txn.id),
+            createdAt,
+          };
+        })
       );
 
       transactionCreated++;
@@ -505,7 +545,10 @@ async function main() {
 
   await resetSeedData();
   await seedPaymentMethods();
-  await seedEventsAndSales();
+
+  const stockTypeIds = await seedStockTransactionTypes();
+
+  await seedEventsAndSales(stockTypeIds);
 
   console.log("🎉 Large seed complete!");
   console.log("   Open your dashboard to test many events and charts.");

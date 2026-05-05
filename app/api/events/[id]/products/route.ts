@@ -48,6 +48,7 @@ export async function PUT(req: NextRequest) {
       ...(b.color       !== undefined && { color:       b.color || null       }),
       ...(b.variantCode !== undefined && { variantCode: b.variantCode || null }),
       ...(b.unit        !== undefined && { unit:        b.unit || "PCS"       }),
+      ...(b.baseItemNo  !== undefined && { baseItemNo:  b.baseItemNo || null  }),
     })
   );
 }

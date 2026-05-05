@@ -44,12 +44,53 @@ export default function EventsPage() {
     setSaving(false); setShowForm(false); setForm(empty()); load();
   }
 
-  
+  async function deleteEventWithLocalCleanup(id: number) {
+    const ok = confirm(
+      "Delete this event? This will also remove its local POS data on this computer."
+    );
 
-  async function handleDelete(id: number) {
-    if (!confirm("Delete this event and all its products?")) return;
-    await fetch(`/api/events?id=${id}`, { method: "DELETE" });
-    load();
+    if (!ok) return;
+
+    const res = await fetch(`/api/events?id=${id}`, {
+      method: "DELETE",
+    });
+
+    const result = await res.json();
+
+    if (!res.ok) {
+      if (
+        res.status === 409 &&
+        result.code === "LOCAL_POS_HAS_UNSYNCED_SALES"
+      ) {
+        const force = confirm(
+          `${result.error}\n\nForce delete anyway? Unsynced local POS sales will be lost.`
+        );
+
+        if (!force) return;
+
+        const forceRes = await fetch(
+          `/api/events?id=${id}&forceLocalDelete=true`,
+          {
+            method: "DELETE",
+          }
+        );
+
+        const forceResult = await forceRes.json();
+
+        if (!forceRes.ok) {
+          alert(forceResult.error || "Failed to delete event");
+          return;
+        }
+
+        await load();
+        return;
+      }
+
+      alert(result.error || "Failed to delete event");
+      return;
+    }
+
+    await load();
   }
 
   const cs  = { background: "var(--card)", borderColor: "var(--border)" };
@@ -206,23 +247,55 @@ export default function EventsPage() {
                     </p>
                   )}
                 </div>
-                <div className="flex items-center gap-1 px-4 py-3 border-t"
-                  style={{ borderColor: "var(--border)", background: "var(--muted)" }}>
-                  <Link href={`/events/${ev.id}`}
-                    className="flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition-all"
-                    style={{ background: "var(--brand-orange)", color: "white" }}>
-                    Manage <ArrowRight size={12} />
+                <div
+                  className="flex items-center justify-between px-5 py-3"
+                  style={{ borderTop: "1px solid var(--border)" }}
+                >
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setForm({
+                          id: ev.id,
+                          name: ev.name,
+                          location: ev.location ?? "",
+                          description: ev.description ?? "",
+                          status: ev.status,
+                          startDate: ev.startDate ?? "",
+                          endDate: ev.endDate ?? "",
+                        });
+                        setShowForm(true);
+                      }}
+                      className="p-2 rounded-lg"
+                      style={{
+                        background: "rgba(255,200,92,0.15)",
+                        color: "#b45309",
+                      }}
+                    >
+                      <Pencil size={14} />
+                    </button>
+
+                    <button
+                      onClick={() => deleteEventWithLocalCleanup(ev.id)}
+                      className="p-2 rounded-lg"
+                      style={{
+                        background: "rgba(220,38,38,0.1)",
+                        color: "#dc2626",
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+
+                  <Link
+                    href={`/events/${ev.id}`}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
+                    style={{
+                      background: "var(--brand-orange)",
+                      color: "white",
+                    }}
+                  >
+                    Manage <ArrowRight size={13} />
                   </Link>
-                  <button onClick={() => { setForm({ ...ev, startDate: ev.startDate?.slice(0, 16) ?? "", endDate: ev.endDate?.slice(0, 16) ?? "" }); setShowForm(true); }}
-                    className="p-2 rounded-lg transition-all"
-                    style={{ background: "rgba(255,200,92,0.15)", color: "#b45309" }}>
-                    <Pencil size={13} />
-                  </button>
-                  <button onClick={() => handleDelete(ev.id)}
-                    className="p-2 rounded-lg transition-all"
-                    style={{ background: "rgba(220,38,38,0.1)", color: "#dc2626" }}>
-                    <Trash2 size={13} />
-                  </button>
                 </div>
               </div>
             );

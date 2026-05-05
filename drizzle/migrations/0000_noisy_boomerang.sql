@@ -1,3 +1,15 @@
+CREATE TABLE "auth_users" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"name" text NOT NULL,
+	"username" text NOT NULL,
+	"password_hash" text NOT NULL,
+	"role" text DEFAULT 'user' NOT NULL,
+	"event_id" integer,
+	"is_active" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp DEFAULT now(),
+	CONSTRAINT "auth_users_username_unique" UNIQUE("username")
+);
+--> statement-breakpoint
 CREATE TABLE "event_items" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"event_id" integer NOT NULL,
@@ -83,12 +95,26 @@ CREATE TABLE "promos" (
 	"created_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
-CREATE TABLE "stock_entries" (
+CREATE TABLE "stock_transaction_types" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"code" text NOT NULL,
+	"name" text NOT NULL,
+	"default_direction" integer DEFAULT 0 NOT NULL,
+	"is_system" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp DEFAULT now()
+);
+--> statement-breakpoint
+CREATE TABLE "stock_transactions" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"event_item_id" integer NOT NULL,
+	"type_id" integer NOT NULL,
 	"quantity" integer NOT NULL,
+	"stock_before" integer NOT NULL,
+	"stock_after" integer NOT NULL,
+	"transaction_id" integer,
+	"reference_type" text,
+	"reference_id" text,
 	"note" text,
-	"source" text DEFAULT 'manual' NOT NULL,
 	"created_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
@@ -119,6 +145,7 @@ CREATE TABLE "transactions" (
 	CONSTRAINT "transactions_client_txn_id_unique" UNIQUE("client_txn_id")
 );
 --> statement-breakpoint
+ALTER TABLE "auth_users" ADD CONSTRAINT "auth_users_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "event_items" ADD CONSTRAINT "event_items_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "payments" ADD CONSTRAINT "payments_transaction_id_transactions_id_fk" FOREIGN KEY ("transaction_id") REFERENCES "public"."transactions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "promo_items" ADD CONSTRAINT "promo_items_promo_id_promos_id_fk" FOREIGN KEY ("promo_id") REFERENCES "public"."promos"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -127,7 +154,13 @@ ALTER TABLE "promo_tiers" ADD CONSTRAINT "promo_tiers_promo_id_promos_id_fk" FOR
 ALTER TABLE "promos" ADD CONSTRAINT "promos_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "promos" ADD CONSTRAINT "promos_free_item_id_event_items_id_fk" FOREIGN KEY ("free_item_id") REFERENCES "public"."event_items"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "promos" ADD CONSTRAINT "promos_free_item_product_id_event_items_id_fk" FOREIGN KEY ("free_item_product_id") REFERENCES "public"."event_items"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "stock_entries" ADD CONSTRAINT "stock_entries_event_item_id_event_items_id_fk" FOREIGN KEY ("event_item_id") REFERENCES "public"."event_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "stock_transactions" ADD CONSTRAINT "stock_transactions_event_item_id_event_items_id_fk" FOREIGN KEY ("event_item_id") REFERENCES "public"."event_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "stock_transactions" ADD CONSTRAINT "stock_transactions_type_id_stock_transaction_types_id_fk" FOREIGN KEY ("type_id") REFERENCES "public"."stock_transaction_types"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "stock_transactions" ADD CONSTRAINT "stock_transactions_transaction_id_transactions_id_fk" FOREIGN KEY ("transaction_id") REFERENCES "public"."transactions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "transaction_items" ADD CONSTRAINT "transaction_items_transaction_id_transactions_id_fk" FOREIGN KEY ("transaction_id") REFERENCES "public"."transactions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "transaction_items" ADD CONSTRAINT "transaction_items_event_item_id_event_items_id_fk" FOREIGN KEY ("event_item_id") REFERENCES "public"."event_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "stock_transaction_types_code_unique" ON "stock_transaction_types" USING btree ("code");--> statement-breakpoint
+CREATE INDEX "stock_transactions_event_item_idx" ON "stock_transactions" USING btree ("event_item_id");--> statement-breakpoint
+CREATE INDEX "stock_transactions_type_idx" ON "stock_transactions" USING btree ("type_id");--> statement-breakpoint
+CREATE INDEX "stock_transactions_transaction_idx" ON "stock_transactions" USING btree ("transaction_id");

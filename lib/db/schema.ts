@@ -1,7 +1,14 @@
 // lib/db/schema.ts
 import {
-  pgTable, serial, text, integer, numeric,
-  timestamp, boolean,
+  pgTable,
+  serial,
+  text,
+  integer,
+  numeric,
+  timestamp,
+  boolean,
+  uniqueIndex,
+  index,
 } from "drizzle-orm/pg-core";
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -40,7 +47,6 @@ export const eventItems = pgTable("event_items", {
   retailPrice: numeric("retail_price", { precision: 12, scale: 2 }).notNull(),
   netPrice:    numeric("net_price",    { precision: 12, scale: 2 }).notNull(),
 
-  // ── Stock (denormalized for fast reads; source-of-truth is stock_entries) ─
   stock:       integer("stock").notNull().default(0),
 
   createdAt:   timestamp("created_at").defaultNow(),
@@ -97,16 +103,100 @@ export const promoItems = pgTable("promo_items", {
     .references(() => eventItems.id, { onDelete: "cascade" }),
 });
 
-// ── Stock Entries ─────────────────────────────────────────────────────────────
-export const stockEntries = pgTable("stock_entries", {
-  id:          serial("id").primaryKey(),
-  eventItemId: integer("event_item_id").notNull()
-    .references(() => eventItems.id, { onDelete: "cascade" }),
-  quantity:    integer("quantity").notNull(),
-  note:        text("note"),
-  source:      text("source").notNull().default("manual"),
-  createdAt:   timestamp("created_at").defaultNow(),
-});
+// ── Stock Transaction Types ────────────────────────────────────────────────
+// Future-proof table: add new stock movement types without changing schema.
+export const stockTransactionTypes = pgTable(
+  "stock_transaction_types",
+  {
+    id: serial("id").primaryKey(),
+
+    /**
+     * Examples:
+     * transfer_in
+     * transfer_out
+     * sale
+     * adjustment
+     */
+    code: text("code").notNull(),
+
+    name: text("name").notNull(),
+
+    /**
+     *  1 = normally increases stock
+     * -1 = normally decreases stock
+     *  0 = can be either positive or negative, e.g. adjustment
+     */
+    defaultDirection: integer("default_direction").notNull().default(0),
+
+    isSystem: boolean("is_system").notNull().default(true),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    codeUnique: uniqueIndex("stock_transaction_types_code_unique").on(
+      table.code
+    ),
+  })
+);
+
+// ── Stock Transactions ─────────────────────────────────────────────────────
+// This is the source-of-truth stock ledger.
+// event_items.stock is only the cached current balance.
+export const stockTransactions = pgTable(
+  "stock_transactions",
+  {
+    id: serial("id").primaryKey(),
+
+    eventItemId: integer("event_item_id")
+      .notNull()
+      .references(() => eventItems.id, { onDelete: "cascade" }),
+
+    typeId: integer("type_id")
+      .notNull()
+      .references(() => stockTransactionTypes.id, { onDelete: "restrict" }),
+
+    /**
+     * Signed quantity:
+     * +10 = stock increases
+     * -3  = stock decreases
+     */
+    quantity: integer("quantity").notNull(),
+
+    /**
+     * Audit fields. Helpful later when debugging stock mismatch.
+     */
+    stockBefore: integer("stock_before").notNull(),
+    stockAfter: integer("stock_after").notNull(),
+
+    /**
+     * Optional link to a sale transaction.
+     * For transfer/adjustment this can stay null.
+     */
+    transactionId: integer("transaction_id").references(() => transactions.id, {
+      onDelete: "set null",
+    }),
+
+    /**
+     * Optional flexible reference for future use:
+     * import file id, sync batch id, admin user id, transfer document no, etc.
+     */
+    referenceType: text("reference_type"),
+    referenceId: text("reference_id"),
+
+    note: text("note"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    eventItemIdx: index("stock_transactions_event_item_idx").on(
+      table.eventItemId
+    ),
+    typeIdx: index("stock_transactions_type_idx").on(table.typeId),
+    transactionIdx: index("stock_transactions_transaction_idx").on(
+      table.transactionId
+    ),
+  })
+);
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 

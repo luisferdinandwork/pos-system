@@ -1,15 +1,21 @@
 // app/api/events/[id]/stock/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import {
-  addStockEntry,
+  addStockTransaction,
   assertEventItemBelongsToEvent,
   getItemsWithStockForEvent,
+  type StockTransactionTypeCode,
 } from "@/lib/stock";
 
-type StockSource = "manual" | "import" | "sale";
+const ALLOWED_TYPE_CODES: StockTransactionTypeCode[] = [
+  "transfer_in",
+  "transfer_out",
+  "adjustment",
+  // "sale" is intentionally excluded — sales go through the transactions route
+];
 
-function isStockSource(value: unknown): value is StockSource {
-  return value === "manual" || value === "import" || value === "sale";
+function isAllowedTypeCode(value: unknown): value is StockTransactionTypeCode {
+  return ALLOWED_TYPE_CODES.includes(value as StockTransactionTypeCode);
 }
 
 export async function GET(
@@ -21,25 +27,15 @@ export async function GET(
     const eventId = Number(id);
 
     if (!Number.isFinite(eventId)) {
-      return NextResponse.json(
-        { error: "Invalid event ID" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
     }
 
     const items = await getItemsWithStockForEvent(eventId);
-
     return NextResponse.json(items);
   } catch (error) {
-    console.error("[EventStockRoute] Failed to load stock items:", error);
-
+    console.error("[EventStockRoute GET] Failed:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load stock items",
-      },
+      { error: error instanceof Error ? error.message : "Failed to load stock items" },
       { status: 500 }
     );
   }
@@ -54,30 +50,31 @@ export async function POST(
     const eventId = Number(id);
 
     if (!Number.isFinite(eventId)) {
-      return NextResponse.json(
-        { error: "Invalid event ID" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
     }
 
     const body = await req.json();
 
     const eventItemId = Number(body.eventItemId);
-    const quantity = Number(body.quantity);
-    const note =
-      typeof body.note === "string" && body.note.trim()
-        ? body.note.trim()
-        : "Manual adjustment";
+    const quantity    = Number(body.quantity);
+    const note        = typeof body.note === "string" && body.note.trim()
+      ? body.note.trim()
+      : undefined;
 
-    const source: StockSource = isStockSource(body.source)
-      ? body.source
-      : "manual";
+    // Accept typeCode directly.
+    // Fall back to mapping the old "source" field so Excel import still works.
+    let typeCode: StockTransactionTypeCode;
+
+    if (isAllowedTypeCode(body.typeCode)) {
+      typeCode = body.typeCode;
+    } else if (body.source === "import") {
+      typeCode = "transfer_in";
+    } else {
+      typeCode = "adjustment";
+    }
 
     if (!Number.isFinite(eventItemId)) {
-      return NextResponse.json(
-        { error: "eventItemId is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "eventItemId is required" }, { status: 400 });
     }
 
     if (!Number.isFinite(quantity) || quantity === 0) {
@@ -89,24 +86,19 @@ export async function POST(
 
     await assertEventItemBelongsToEvent(eventId, eventItemId);
 
-    const entry = await addStockEntry(
+    const entry = await addStockTransaction({
       eventItemId,
+      typeCode,
       quantity,
-      note,
-      source
-    );
+      note: note ?? null,
+      referenceType: body.source ?? typeCode,
+    });
 
     return NextResponse.json(entry, { status: 201 });
   } catch (error) {
-    console.error("[EventStockRoute] Failed to add stock entry:", error);
-
+    console.error("[EventStockRoute POST] Failed:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to add stock entry",
-      },
+      { error: error instanceof Error ? error.message : "Failed to add stock entry" },
       { status: 500 }
     );
   }

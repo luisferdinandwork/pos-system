@@ -71,20 +71,20 @@ export async function createTransaction(payload: CheckoutPayload) {
       })
       .returning();
 
-    const itemRows = payload.items.map((item) => ({
-      transactionId: txn.id,
-      eventItemId: item.eventItemId,
-      productName: item.productName,
-      itemId: item.itemId,
-      quantity: item.quantity,
-      unitPrice: String(item.unitPrice),
-      discountAmt: String(item.discountAmt),
-      finalPrice: String(item.finalPrice),
-      subtotal: String(item.subtotal),
-      promoApplied: item.promoApplied ?? null,
-    }));
-
-    await tx.insert(transactionItems).values(itemRows);
+    await tx.insert(transactionItems).values(
+      payload.items.map((item) => ({
+        transactionId: txn.id,
+        eventItemId: item.eventItemId,
+        itemId: item.itemId,
+        productName: item.productName,
+        quantity: item.quantity,
+        unitPrice: String(item.unitPrice),
+        discountAmt: String(item.discountAmt),
+        finalPrice: String(item.finalPrice),
+        subtotal: String(item.subtotal),
+        promoApplied: item.promoApplied ?? null,
+      }))
+    );
 
     await tx.insert(payments).values({
       transactionId: txn.id,
@@ -93,8 +93,13 @@ export async function createTransaction(payload: CheckoutPayload) {
       paidAt: payload.createdAt ? new Date(payload.createdAt) : new Date(),
     });
 
+    /**
+     * IMPORTANT:
+     * Pass tx here.
+     * Otherwise stock.ts opens another transaction and cannot see txn.id yet.
+     */
     for (const item of payload.items) {
-      await deductStock(item.eventItemId, item.quantity, txn.id);
+      await deductStock(item.eventItemId, item.quantity, txn.id, tx);
     }
 
     return txn;

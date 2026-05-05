@@ -1,6 +1,6 @@
-// app/api/events/[id]/stock/export/route.ts
+// app/api/events/[id]/stock/transfer-out/export/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { buildStockExcel } from "@/lib/export-excel";
+import { buildTransferOutExcel } from "@/lib/export-excel";
 import { getAllEvents } from "@/lib/events";
 
 function safeFileName(name: string) {
@@ -29,14 +29,14 @@ export async function GET(
     return NextResponse.json({ error: "Event not found" }, { status: 404 });
   }
 
-  const data = await buildStockExcel(eventId, event.name);
+  const data = await buildTransferOutExcel(eventId, event.name);
   const fileName = safeFileName(event.name);
 
   return new NextResponse(data, {
     headers: {
       "Content-Type":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="${fileName}-stock.xlsx"`,
+      "Content-Disposition": `attachment; filename="${fileName}-transfer-out.xlsx"`,
     },
   });
 }

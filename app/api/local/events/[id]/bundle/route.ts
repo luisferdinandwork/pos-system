@@ -20,18 +20,22 @@ export async function GET(
     }
 
     const bundle = await getLocalEventBundle(eventId);
-
     return NextResponse.json(bundle);
   } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to load local event bundle";
+
+    if (message.includes("not prepared")) {
+      return NextResponse.json(
+        { error: "Local event is not prepared" },
+        { status: 404 }
+      );
+    }
+
     console.error("[LocalBundleRoute] Failed:", error);
 
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load local event bundle",
-      },
+      { error: message },
       { status: 500 }
     );
   }

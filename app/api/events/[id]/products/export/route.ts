@@ -8,7 +8,12 @@ export async function GET(
 ) {
   const { id }  = await params;
   const eventId = Number(id);
-  const data    = await buildEventItemExcel(isNaN(eventId) ? 0 : eventId);
+
+  if (isNaN(eventId)) {
+    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
+  }
+
+  const data = await buildEventItemExcel(eventId);
 
   return new NextResponse(data, {
     headers: {

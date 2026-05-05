@@ -21,9 +21,8 @@ export async function POST(
   const b       = await req.json();
   const promo   = await createPromo({ ...b, eventId: Number(id) });
 
-  if (b.tiers?.length)    await setPromoTiers(promo.id, b.tiers);
-  // itemIds now refers to event_items.id values
-  if (b.itemIds?.length)  await setPromoItems(promo.id, b.itemIds);
+  if (b.tiers?.length)   await setPromoTiers(promo.id, b.tiers);
+  if (b.itemIds?.length) await setPromoItems(promo.id, b.itemIds);
 
   return NextResponse.json(promo, { status: 201 });
 }

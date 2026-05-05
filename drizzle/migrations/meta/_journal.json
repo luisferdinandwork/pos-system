@@ -5,22 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1777437274085,
-      "tag": "0000_massive_mysterio",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1777451422852,
-      "tag": "0001_fat_madame_web",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1777451991690,
-      "tag": "0002_absurd_roland_deschain",
+      "when": 1777953123496,
+      "tag": "0000_noisy_boomerang",
       "breakpoints": true
     }
   ]

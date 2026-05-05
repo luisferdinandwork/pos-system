@@ -33,7 +33,7 @@ export function EventsTable({ events }: Props) {
                 "Status",
                 "Revenue",
                 "Transactions",
-                "Sell-Through",
+                "Sell Ratio",
                 "Remaining",
                 "",
               ].map((h) => (
@@ -128,7 +128,7 @@ export function EventsTable({ events }: Props) {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2.5">
                       <svg width="34" height="34" viewBox="0 0 34 34"
-                        role="img" aria-label={`${sellPct}% sell-through`}>
+                        role="img" aria-label={`${sellPct}% sell-ratio`}>
                         <circle cx="17" cy="17" r="13" fill="none"
                           stroke="rgba(124,58,237,0.12)" strokeWidth="3.5" />
                         <circle cx="17" cy="17" r="13" fill="none"
