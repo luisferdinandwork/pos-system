@@ -1799,7 +1799,7 @@ function POSInner() {
             Turn Off
           </button>
 
-          <button
+          {/* <button
             onClick={() => {
               setActionError("");
               setActionDialog("delete-event");
@@ -1809,12 +1809,13 @@ function POSInner() {
           >
             <Trash2 size={12} />
             Delete
-          </button>
+          </button> */}
 
           <button
             onClick={exitPOS}
             className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all"
-            style={{ color: "#9ca3af", background: "white", borderColor: "#e5e7eb" }}
+            // style={{ color: "#9ca3af", background: "white", borderColor: "#e5e7eb" }}
+            style={{ color: "#dc2626", background: "white", borderColor: "#fecaca" }}
           >
             <LogOut size={12} />
             <span className="hidden sm:inline">Exit</span>
