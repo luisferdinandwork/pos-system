@@ -1,15 +1,9 @@
 // app/api/events/[id]/stock/transfer-out/export/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { buildTransferOutExcel } from "@/lib/export-excel";
-import { getAllEvents } from "@/lib/events";
-
-function safeFileName(name: string) {
-  return name
-    .trim()
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
-    .replace(/\s+/g, "-")
-    .toLowerCase();
-}
+import { buildTransferOutExcel, toSafeFilename } from "@/lib/export-excel";
+import { db } from "@/lib/db";
+import { events } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export async function GET(
   _req: NextRequest,
@@ -17,26 +11,18 @@ export async function GET(
 ) {
   const { id } = await params;
   const eventId = Number(id);
+  if (!Number.isFinite(eventId)) return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
 
-  if (!Number.isFinite(eventId)) {
-    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
-  }
+  const [eventRow] = await db.select().from(events).where(eq(events.id, eventId)).limit(1);
+  if (!eventRow) return NextResponse.json({ error: "Event not found" }, { status: 404 });
 
-  const events = await getAllEvents();
-  const event = events.find((row) => row.id === eventId);
+  const data     = await buildTransferOutExcel(eventId, eventRow.name);
+  const safeName = toSafeFilename(eventRow.name);
 
-  if (!event) {
-    return NextResponse.json({ error: "Event not found" }, { status: 404 });
-  }
-
-  const data = await buildTransferOutExcel(eventId, event.name);
-  const fileName = safeFileName(event.name);
-
-  return new NextResponse(data, {
+  return new NextResponse(data as any, {
     headers: {
-      "Content-Type":
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="${fileName}-transfer-out.xlsx"`,
+      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="${safeName}_transfer_out_template.xlsx"`,
     },
   });
 }

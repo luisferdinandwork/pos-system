@@ -10,13 +10,13 @@ import {
   AlertCircle, Layers, Zap, ToggleLeft, ToggleRight,
   LayoutDashboard, History, ShoppingBag,
   TrendingUp, DollarSign, Activity, RefreshCw,
-  User,
+  User, FileSpreadsheet,
 } from "lucide-react";
 import Link from "next/link";
 import { formatRupiah, formatDate, safeFloat } from "@/lib/utils";
 import { EventUsersPanel } from "@/components/events/EventUsersPanel";
 import { StockTab } from "@/components/events/StockTab";
-import { TurnOffLocalPOSButton } from "@/components/events/TurnOffLocalPOSButton";
+import { PromoFormModal, type PromoFormData } from "@/components/events/PromoFormModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type EventRow = {
@@ -36,7 +36,9 @@ type PromoItem = {
   name: string; variantCode: string | null; itemId: string;
 };
 
-type Tier = { minQty: number; discountPct?: string; discountFix?: string; fixedPrice?: string };
+type Tier = {
+  minQty: number; discount: string;
+};
 
 type Promo = {
   id: number; name: string; type: string;
@@ -94,13 +96,13 @@ const emptyItem = () => ({
   variantCode: "", unit: "PCS", netPrice: "", retailPrice: "", stock: "",
 });
 
-const emptyPromo = () => ({
-  name: "", type: "discount_pct" as string, isActive: true, applyToAll: false,
+const emptyPromo = (): PromoFormData => ({
+  name: "", type: "discount_pct", isActive: true, applyToAll: false,
   discountPct: "", discountFix: "", fixedPrice: "",
   buyQty: 1, getFreeQty: 1, spendMinAmount: "", bundlePrice: "",
   flashStartTime: "", flashEndTime: "",
   minPurchaseQty: 1, maxUsageCount: "",
-  tiers: [] as Tier[], itemIds: [] as number[],
+  tiers: [], itemIds: [],
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -143,7 +145,7 @@ export default function EventDetailPage() {
 
   // Promo form
   const [showPromoForm, setShowPromoForm] = useState(false);
-  const [promoForm,     setPromoForm]     = useState(emptyPromo());
+  const [promoForm,     setPromoForm]     = useState<PromoFormData>(emptyPromo());
   const [editPromoId,   setEditPromoId]   = useState<number | null>(null);
   const [savingPromo,   setSavingPromo]   = useState(false);
 
@@ -400,13 +402,15 @@ export default function EventDetailPage() {
           {event?.location && <p className="text-sm mt-0.5" style={{ color: "var(--muted-foreground)" }}>{event.location}</p>}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <TurnOffLocalPOSButton eventId={eventId} onDone={load} />
-
-          <Link
-            href={`/pos?event=${eventId}`}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold"
-            style={{ background: "var(--brand-orange)", color: "white" }}
+          <a
+            href={`/api/events/${eventId}/report`}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border transition-all hover:bg-black/5"
+            style={{ borderColor: "var(--border)", color: "var(--foreground)", background: "var(--card)" }}
+            title="Export full event report (Items, Stock, Transactions, Promos, Summary)"
           >
+            <FileSpreadsheet size={14} /> Export Report
+          </a>
+          <Link href={`/pos?event=${eventId}`} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold flex-shrink-0" style={{ background: "var(--brand-orange)", color: "white" }}>
             <Zap size={14} /> Open POS
           </Link>
         </div>
@@ -725,10 +729,12 @@ export default function EventDetailPage() {
       {/* ══════════════════════════════════════════════════════════════════ */}
       {tab === "transactions" && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
             <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>{txns.length} transactions for this event</p>
-            <a href={`/api/events/${eventId}/transactions/export`} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border" style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
-              <Download size={13} /> Export
+            <a href={`/api/events/${eventId}/report`}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border"
+              style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
+              <FileSpreadsheet size={13} /> Full Report
             </a>
           </div>
           <div className="rounded-2xl border overflow-hidden" style={card}>
@@ -840,91 +846,21 @@ export default function EventDetailPage() {
       )}
 
       {/* ════════════════════════════════════════════════════════════════════ */}
-      {/* PROMO FORM MODAL                                                    */}
+      {/* PROMO FORM MODAL — extracted to PromoFormModal component            */}
       {/* ════════════════════════════════════════════════════════════════════ */}
       {showPromoForm && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: "rgba(15,10,40,0.4)", backdropFilter: "blur(4px)" }}>
-          <div className="rounded-2xl border w-full max-w-2xl shadow-2xl my-6" style={card}>
-            <div className="flex items-center justify-between px-6 py-4 border-b sticky top-0 z-10 rounded-t-2xl" style={{ ...card, borderColor: "var(--border)" }}>
-              <h2 className="font-bold text-base" style={{ color: "var(--foreground)" }}>{editPromoId ? "Edit Promo" : "New Promo"}</h2>
-              <button onClick={() => setShowPromoForm(false)} className="p-1.5 rounded-lg" style={{ background: "var(--muted)", color: "var(--muted-foreground)" }}><X size={15} /></button>
-            </div>
-            <form onSubmit={handleSavePromo} className="p-6 space-y-5">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Promo Type *</label>
-                <div className="grid grid-cols-4 gap-2">
-                  {PROMO_TYPES.map((t) => (
-                    <button key={t.value} type="button" onClick={() => setPromoForm({ ...promoForm, type: t.value })} className="rounded-xl border px-2 py-3 text-xs font-semibold transition-all text-center" style={{ borderColor: promoForm.type === t.value ? "var(--brand-orange)" : "var(--border)", background: promoForm.type === t.value ? "rgba(255,101,63,0.08)" : "transparent", color: promoForm.type === t.value ? "var(--brand-orange)" : "var(--muted-foreground)" }}>
-                      <span className="text-lg block mb-1">{t.icon}</span>{t.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Promo Name *</label>
-                <input required value={promoForm.name} onChange={(e) => setPromoForm({ ...promoForm, name: e.target.value })} placeholder="e.g. Diskon 20% Sepatu" className={inp} style={ist} />
-              </div>
-              {(promoForm.type === "discount_pct" || promoForm.type === "flash") && (<div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Discount %</label><input type="number" min="0" max="100" value={promoForm.discountPct} onChange={(e) => setPromoForm({ ...promoForm, discountPct: e.target.value })} placeholder="20" className={inp} style={ist} /></div>)}
-              {promoForm.type === "discount_fix" && (<div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Discount Amount (Rp)</label><input type="number" min="0" value={promoForm.discountFix} onChange={(e) => setPromoForm({ ...promoForm, discountFix: e.target.value })} placeholder="50000" className={inp} style={ist} /></div>)}
-              {promoForm.type === "fixed_price" && (<div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Fixed Price (Rp)</label><input type="number" min="0" value={promoForm.fixedPrice} onChange={(e) => setPromoForm({ ...promoForm, fixedPrice: e.target.value })} placeholder="299000" className={inp} style={ist} /></div>)}
-              {promoForm.type === "buy_x_get_y" && (<div className="grid grid-cols-2 gap-3"><div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Buy Qty</label><input type="number" min="1" value={promoForm.buyQty} onChange={(e) => setPromoForm({ ...promoForm, buyQty: Number(e.target.value) })} className={inp} style={ist} /></div><div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Get Free Qty</label><input type="number" min="1" value={promoForm.getFreeQty} onChange={(e) => setPromoForm({ ...promoForm, getFreeQty: Number(e.target.value) })} className={inp} style={ist} /></div></div>)}
-              {promoForm.type === "spend_get_free" && (<div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Min Spend (Rp)</label><input type="number" min="0" value={promoForm.spendMinAmount} onChange={(e) => setPromoForm({ ...promoForm, spendMinAmount: e.target.value })} placeholder="500000" className={inp} style={ist} /></div>)}
-              {promoForm.type === "bundle" && (<div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Bundle Price (Rp)</label><input type="number" min="0" value={promoForm.bundlePrice} onChange={(e) => setPromoForm({ ...promoForm, bundlePrice: e.target.value })} placeholder="199000" className={inp} style={ist} /></div>)}
-              {promoForm.type === "flash" && (<div className="grid grid-cols-2 gap-3"><div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Flash Start</label><input type="datetime-local" value={promoForm.flashStartTime} onChange={(e) => setPromoForm({ ...promoForm, flashStartTime: e.target.value })} className={inp} style={ist} /></div><div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Flash End</label><input type="datetime-local" value={promoForm.flashEndTime} onChange={(e) => setPromoForm({ ...promoForm, flashEndTime: e.target.value })} className={inp} style={ist} /></div></div>)}
-              {promoForm.type === "qty_tiered" && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>Discount Tiers</label>
-                    <button type="button" onClick={() => setPromoForm({ ...promoForm, tiers: [...promoForm.tiers, { minQty: 1, discountPct: "" }] })} className="text-xs px-3 py-1 rounded-lg font-semibold" style={{ background: "rgba(255,101,63,0.1)", color: "var(--brand-orange)" }}>+ Add Tier</button>
-                  </div>
-                  <div className="space-y-2">
-                    {promoForm.tiers.map((tier, idx) => (
-                      <div key={idx} className="flex items-end gap-2 p-3 rounded-xl" style={{ background: "var(--muted)" }}>
-                        <div className="flex-1"><label className="block text-xs mb-1" style={{ color: "var(--muted-foreground)" }}>Min Qty</label><input type="number" min="1" value={tier.minQty} onChange={(e) => { const t = [...promoForm.tiers]; t[idx] = { ...t[idx], minQty: Number(e.target.value) }; setPromoForm({ ...promoForm, tiers: t }); }} className={inp} style={ist} /></div>
-                        <div className="flex-1"><label className="block text-xs mb-1" style={{ color: "var(--muted-foreground)" }}>Discount %</label><input type="number" min="0" max="100" value={tier.discountPct ?? ""} onChange={(e) => { const t = [...promoForm.tiers]; t[idx] = { ...t[idx], discountPct: e.target.value, discountFix: "", fixedPrice: "" }; setPromoForm({ ...promoForm, tiers: t }); }} placeholder="10" className={inp} style={ist} /></div>
-                        <div className="flex-1"><label className="block text-xs mb-1" style={{ color: "var(--muted-foreground)" }}>Fixed Price</label><input type="number" min="0" value={tier.fixedPrice ?? ""} onChange={(e) => { const t = [...promoForm.tiers]; t[idx] = { ...t[idx], fixedPrice: e.target.value, discountPct: "", discountFix: "" }; setPromoForm({ ...promoForm, tiers: t }); }} placeholder="199000" className={inp} style={ist} /></div>
-                        <button type="button" onClick={() => setPromoForm({ ...promoForm, tiers: promoForm.tiers.filter((_, i) => i !== idx) })} className="p-2 rounded-lg flex-shrink-0" style={{ color: "#dc2626", background: "rgba(220,38,38,0.1)" }}><X size={13} /></button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Apply To</label>
-                <div className="flex gap-2 mb-3">
-                  {[{ label: "All Items", val: true }, { label: "Select Items", val: false }].map(({ label, val }) => (
-                    <button key={label} type="button" onClick={() => setPromoForm({ ...promoForm, applyToAll: val, itemIds: val ? [] : promoForm.itemIds })} className="flex-1 rounded-xl border py-2.5 text-sm font-semibold transition-all" style={{ borderColor: promoForm.applyToAll === val ? "var(--brand-orange)" : "var(--border)", background: promoForm.applyToAll === val ? "rgba(255,101,63,0.08)" : "transparent", color: promoForm.applyToAll === val ? "var(--brand-orange)" : "var(--muted-foreground)" }}>{label}</button>
-                  ))}
-                </div>
-                {!promoForm.applyToAll && (
-                  <div className="rounded-xl border overflow-hidden max-h-52 overflow-y-auto" style={card}>
-                    {items.map((item) => {
-                      const checked = promoForm.itemIds.includes(item.id);
-                      return (
-                        <label key={item.id} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-black/5 border-b last:border-b-0" style={{ borderColor: "var(--border)" }}>
-                          <input type="checkbox" checked={checked} onChange={() => setPromoForm({ ...promoForm, itemIds: checked ? promoForm.itemIds.filter((x) => x !== item.id) : [...promoForm.itemIds, item.id] })} />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium truncate" style={{ color: "var(--foreground)" }}>{item.name}</p>
-                            <p className="text-xs font-mono" style={{ color: "var(--muted-foreground)" }}>{item.itemId}</p>
-                          </div>
-                          <span className="text-xs font-bold flex-shrink-0" style={{ color: "var(--brand-orange)" }}>{formatRupiah(item.netPrice)}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t" style={{ borderColor: "var(--border)" }}>
-                <div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Min Purchase Qty</label><input type="number" min="1" value={promoForm.minPurchaseQty} onChange={(e) => setPromoForm({ ...promoForm, minPurchaseQty: Number(e.target.value) })} className={inp} style={ist} /></div>
-                <div><label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "var(--muted-foreground)" }}>Max Usage (blank = ∞)</label><input type="number" min="0" value={promoForm.maxUsageCount} onChange={(e) => setPromoForm({ ...promoForm, maxUsageCount: e.target.value })} placeholder="Unlimited" className={inp} style={ist} /></div>
-              </div>
-              <div className="flex gap-2 pt-1">
-                <button type="submit" disabled={savingPromo} className="flex-1 rounded-xl py-2.5 text-sm font-bold" style={{ background: "var(--brand-orange)", color: "white" }}>{savingPromo ? "Saving…" : editPromoId ? "Update Promo" : "Create Promo"}</button>
-                <button type="button" onClick={() => setShowPromoForm(false)} className="px-5 rounded-xl text-sm border font-medium" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>Cancel</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <PromoFormModal
+          editPromoId={editPromoId}
+          promoForm={promoForm}
+          setPromoForm={setPromoForm}
+          items={items}
+          onSave={handleSavePromo}
+          onClose={() => { setShowPromoForm(false); setPromoForm(emptyPromo()); setEditPromoId(null); }}
+          saving={savingPromo}
+          card={card}
+          inp={inp}
+          ist={ist}
+        />
       )}
     </div>
   );
