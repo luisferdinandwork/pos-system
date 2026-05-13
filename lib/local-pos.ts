@@ -531,7 +531,7 @@ export async function getLocalPOSState() {
 
   const [pendingRow] = localDb
     .select({
-      count: sql<number>`count(${localTransactions.id})`,
+      count: sql<number>`count(${localTransactions.clientTxnId})`,
     })
     .from(localTransactions)
     .where(
@@ -563,7 +563,7 @@ export async function getLocalPreparedEventsState() {
   const eventsWithPending = preparedEvents.map((event) => {
     const pendingRow = localDb
       .select({
-        count: sql<number>`count(${localTransactions.id})`,
+        count: sql<number>`count(${localTransactions.clientTxnId})`,
       })
       .from(localTransactions)
       .where(
@@ -588,7 +588,7 @@ export async function getLocalPreparedEventsState() {
 export function getLocalPendingSyncCount(eventId: number) {
   const row = localDb
     .select({
-      count: sql<number>`count(${localTransactions.id})`,
+      count: sql<number>`count(${localTransactions.clientTxnId})`,
     })
     .from(localTransactions)
     .where(
