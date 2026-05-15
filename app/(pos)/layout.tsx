@@ -5,7 +5,7 @@
 
 export default function POSLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="h-screen w-screen overflow-hidden">
+    <div className="fixed inset-0 h-dvh w-dvw overflow-hidden">
       {children}
     </div>
   );

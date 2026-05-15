@@ -10,12 +10,15 @@ import {
   AlertCircle, Layers, Zap, ToggleLeft, ToggleRight,
   LayoutDashboard, History, ShoppingBag,
   TrendingUp, DollarSign, Activity, RefreshCw,
-  User, FileSpreadsheet,
+  User, FileSpreadsheet, ReceiptText, WalletCards,
 } from "lucide-react";
 import Link from "next/link";
 import { formatRupiah, formatDate, safeFloat } from "@/lib/utils";
 import { EventUsersPanel } from "@/components/events/EventUsersPanel";
 import { StockTab } from "@/components/events/StockTab";
+import { CashDrawerCountsTab } from "@/components/events/CashDrawerCountsTab";
+import { ReceiptTemplateTab } from "@/components/events/ReceiptTemplateTab";
+import { TransactionsTab } from "@/components/events/TransactionsTab";
 import { PromoFormModal, type PromoFormData } from "@/components/events/PromoFormModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -52,9 +55,19 @@ type Promo = {
 };
 
 type Transaction = {
-  id: number; eventId: number; totalAmount: string; discount: string;
-  finalAmount: string; paymentMethod: string | null;
-  paymentReference: string | null; createdAt: string | null;
+  id: number;
+  displayId?: string | null;
+  eventId: number;
+  clientTxnId?: string | null;
+  cashierSessionId?: number | null;
+  totalAmount: string;
+  discount: string;
+  finalAmount: string;
+  cashTendered?: string | null;
+  changeAmount?: string | null;
+  paymentMethod: string | null;
+  paymentReference: string | null;
+  createdAt: string | null;
 };
 
 type EventStats = {
@@ -71,7 +84,7 @@ type EventStats = {
   };
 };
 
-type Tab = "dashboard" | "items" | "promos" | "stock" | "transactions" | "users";
+type Tab = "dashboard" | "items" | "promos" | "stock" | "transactions" | "cashDrawer" | "receipt" | "users";
 
 // ── Promo type definitions ────────────────────────────────────────────────────
 const PROMO_TYPES = [
@@ -379,6 +392,8 @@ export default function EventDetailPage() {
     { key: "promos",       label: "Promos",       icon: <Tag size={14} />, count: promos.length },
     { key: "stock",        label: "Stock",        icon: <Activity size={14} /> },
     { key: "transactions", label: "Transactions", icon: <History size={14} />, count: txns.length },
+    { key: "cashDrawer",   label: "Cash Drawer",  icon: <WalletCards size={14} /> },
+    { key: "receipt",      label: "Receipt CMS",  icon: <ReceiptText size={14} /> },
     { key: "users",        label: "Users",        icon: <User size={14} /> },
   ];
 
@@ -728,57 +743,23 @@ export default function EventDetailPage() {
       {/* TRANSACTIONS TAB                                                   */}
       {/* ══════════════════════════════════════════════════════════════════ */}
       {tab === "transactions" && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>{txns.length} transactions for this event</p>
-            <a href={`/api/events/${eventId}/report`}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border"
-              style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
-              <FileSpreadsheet size={13} /> Full Report
-            </a>
-          </div>
-          <div className="rounded-2xl border overflow-hidden" style={card}>
-            {txns.length === 0 ? (
-              <div className="py-16 text-center">
-                <History size={36} className="mx-auto opacity-20" style={{ color: "var(--muted-foreground)" }} />
-                <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>No transactions yet.</p>
-              </div>
-            ) : (
-              <div>
-                {txns.map((txn, i) => (
-                  <div key={txn.id} style={{ borderBottom: i < txns.length - 1 ? "1px solid var(--border)" : "none" }}>
-                    <button className="w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-black/[0.03]" onClick={() => loadTxnItems(txn.id)}>
-                      <span className="font-mono text-xs w-14 flex-shrink-0" style={{ color: "var(--muted-foreground)" }}>#{String(txn.id).padStart(5, "0")}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
-                          {txn.paymentMethod ?? "—"}
-                          {txn.paymentReference && <span className="ml-2 text-xs" style={{ color: "var(--muted-foreground)" }}>· {txn.paymentReference}</span>}
-                        </p>
-                        <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>{formatDate(txn.createdAt)}</p>
-                      </div>
-                      {safeFloat(txn.discount) > 0 && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.1)", color: "#16a34a" }}>−{formatRupiah(txn.discount)}</span>}
-                      <span className="font-bold flex-shrink-0" style={{ color: "var(--brand-orange)" }}>{formatRupiah(txn.finalAmount)}</span>
-                    </button>
-                    {expandedTxn === txn.id && txnItems[txn.id] && (
-                      <div className="px-5 pb-3 pt-1 space-y-1" style={{ background: "var(--muted)", borderTop: "1px solid var(--border)" }}>
-                        {(txnItems[txn.id] as { productName: string; itemId: string; quantity: number; finalPrice: string; discountAmt: string; promoApplied: string | null }[]).map((li, j) => (
-                          <div key={j} className="flex items-center justify-between text-xs">
-                            <span style={{ color: "var(--foreground)" }}>
-                              {li.productName} <span style={{ color: "var(--muted-foreground)" }}>×{li.quantity}</span>
-                              {li.promoApplied && <span className="ml-1.5 font-medium" style={{ color: "#16a34a" }}>[{li.promoApplied}]</span>}
-                            </span>
-                            <span className="font-mono font-bold" style={{ color: "var(--foreground)" }}>{formatRupiah(parseFloat(li.finalPrice) * li.quantity)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        <TransactionsTab
+          eventId={eventId}
+          transactions={txns}
+          onRefresh={load}
+        />
       )}
+
+
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {/* CASH DRAWER TAB                                                   */}
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {tab === "cashDrawer" && <CashDrawerCountsTab eventId={eventId} />}
+
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {/* RECEIPT CMS TAB                                                    */}
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {tab === "receipt" && <ReceiptTemplateTab eventId={eventId} eventName={event?.name} />}
 
       {/* ══════════════════════════════════════════════════════════════════ */}
       {/* USERS TAB                                                          */}

@@ -1,4 +1,4 @@
-// lib/db/seed.ts
+// scripts/seed.ts
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { sql } from "drizzle-orm";
@@ -11,12 +11,24 @@ import {
   transactionItems,
   payments,
   paymentMethods,
-} from "./schema";
+  edcMachines,
+  cashierSessions,
+  receiptPrintLogs,
+  cashDrawerCounts,
+  eventReceiptTemplates,
+} from "../lib/db/schema";
+import { formatTransactionDisplayId } from "../lib/utils";
 import * as dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
 
-const db = drizzle(neon(process.env.DATABASE_URL!));
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is missing in .env.local");
+}
+
+const db = drizzle(neon(databaseUrl));
 
 type SeedEvent = {
   name: string;
@@ -39,78 +51,37 @@ type SeedItem = {
   stock: number;
 };
 
-const PAYMENT_METHODS = [
-  { name: "Cash", type: "cash", provider: null, sortOrder: 0 },
-  { name: "QRIS", type: "qris", provider: "QRIS", sortOrder: 1 },
-  { name: "EDC BCA", type: "debit", provider: "BCA", sortOrder: 2 },
-  { name: "EDC Mandiri", type: "debit", provider: "Mandiri", sortOrder: 3 },
-  { name: "GoPay", type: "ewallet", provider: "Gojek", sortOrder: 4 },
-  { name: "OVO", type: "ewallet", provider: "OVO", sortOrder: 5 },
-];
+type SeedPaymentMethod = {
+  name: string;
+  type: "cash" | "edc";
+  edcMethod: "debit" | "credit" | "qris" | null;
+  provider: string | null;
+  sortOrder: number;
+};
 
 const SEED_EVENTS: SeedEvent[] = [
   {
     name: "Jakarta Sneaker Fair 2026",
     location: "Mall Kelapa Gading",
     status: "active",
-    startOffsetDays: -4,
+    startOffsetDays: -3,
     durationDays: 10,
-    transactionCount: 90,
+    transactionCount: 32,
   },
   {
-    name: "Bandung Weekend Expo",
-    location: "Paris Van Java",
-    status: "active",
-    startOffsetDays: -2,
-    durationDays: 7,
-    transactionCount: 64,
-  },
-  {
-    name: "Surabaya Sport Bazaar",
-    location: "Tunjungan Plaza",
-    status: "active",
-    startOffsetDays: -1,
-    durationDays: 5,
-    transactionCount: 42,
-  },
-  {
-    name: "Bali Summer Sale",
+    name: "Bali Summer Sale 2026",
     location: "Beachwalk Shopping Center",
     status: "closed",
-    startOffsetDays: -24,
-    durationDays: 8,
-    transactionCount: 78,
+    startOffsetDays: -25,
+    durationDays: 7,
+    transactionCount: 24,
   },
   {
-    name: "Medan Year-End Clearance",
-    location: "Sun Plaza",
-    status: "closed",
-    startOffsetDays: -40,
-    durationDays: 9,
-    transactionCount: 52,
-  },
-  {
-    name: "Yogyakarta Campus Pop-Up",
-    location: "Ambarrukmo Plaza",
-    status: "closed",
-    startOffsetDays: -18,
-    durationDays: 4,
-    transactionCount: 34,
-  },
-  {
-    name: "Semarang Ramadan Promo",
-    location: "DP Mall",
+    name: "Bandung Weekend Expo 2026",
+    location: "Paris Van Java",
     status: "draft",
-    startOffsetDays: 7,
-    durationDays: 8,
-    transactionCount: 0,
-  },
-  {
-    name: "Makassar Grand Opening",
-    location: "Trans Studio Mall",
-    status: "draft",
-    startOffsetDays: 14,
-    durationDays: 10,
+    startOffsetDays: 8,
+    durationDays: 5,
     transactionCount: 0,
   },
 ];
@@ -235,6 +206,13 @@ const STOCK_TRANSACTION_TYPES = [
   { code: "adjustment", name: "Adjustment", defaultDirection: 0 },
 ];
 
+const PAYMENT_METHODS: SeedPaymentMethod[] = [
+  { name: "Cash", type: "cash", edcMethod: null, provider: null, sortOrder: 0 },
+  { name: "Debit Card", type: "edc", edcMethod: "debit", provider: null, sortOrder: 10 },
+  { name: "Credit Card", type: "edc", edcMethod: "credit", provider: null, sortOrder: 11 },
+  { name: "QRIS", type: "edc", edcMethod: "qris", provider: null, sortOrder: 12 },
+];
+
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -267,13 +245,13 @@ function paymentReference(method: string) {
   if (method === "Cash") return null;
 
   const prefix =
-    method === "QRIS"
-      ? "QR"
-      : method.includes("BCA")
-        ? "BCA"
-        : method.includes("Mandiri")
-          ? "MDR"
-          : method.toUpperCase();
+    method === "Debit Card"
+      ? "DBT"
+      : method === "Credit Card"
+        ? "CRD"
+        : method === "QRIS"
+          ? "QR"
+          : "PAY";
 
   return `${prefix}-${randomInt(100000, 999999)}`;
 }
@@ -281,38 +259,80 @@ function paymentReference(method: string) {
 function discountForLine(unitPrice: number, quantity: number) {
   const roll = Math.random();
 
-  if (roll < 0.25) {
-    return Math.round(unitPrice * quantity * 0.1);
-  }
-
-  if (roll < 0.4) {
-    return Math.round(unitPrice * quantity * 0.2);
-  }
+  if (roll < 0.25) return Math.round(unitPrice * quantity * 0.1);
+  if (roll < 0.4) return Math.round(unitPrice * quantity * 0.2);
 
   return 0;
+}
+
+function buildCashValues(method: string, finalAmount: number) {
+  if (method !== "Cash") {
+    return { cashTendered: null, changeAmount: null };
+  }
+
+  const roundedTendered = Math.ceil(finalAmount / 50000) * 50000;
+  const cashTendered = Math.max(roundedTendered, finalAmount);
+  const changeAmount = cashTendered - finalAmount;
+
+  return { cashTendered, changeAmount };
+}
+
+function createDisplayId(date: Date, sequence: number) {
+  return formatTransactionDisplayId(date, sequence);
 }
 
 async function resetSeedData() {
   console.log("🧹 Clearing old seed data...");
 
+  /**
+   * Delete child tables first to avoid FK errors.
+   * This only clears seeded app data, not drizzle migrations.
+   */
+  await db.delete(receiptPrintLogs);
+  await db.delete(cashDrawerCounts);
+  await db.delete(eventReceiptTemplates);
   await db.delete(payments);
   await db.delete(transactionItems);
-  await db.delete(transactions);
   await db.delete(stockTransactions);
+  await db.delete(transactions);
+  await db.delete(cashierSessions);
   await db.delete(stockTransactionTypes);
   await db.delete(eventItems);
   await db.delete(events);
   await db.delete(paymentMethods);
+  await db.delete(edcMachines);
 
   console.log("   ✅ Old seed data cleared.\n");
 }
 
-async function seedPaymentMethods() {
-  console.log("🌱 Seeding payment methods...");
+async function seedPaymentData() {
+  console.log("🌱 Seeding payment data...");
 
-  await db.insert(paymentMethods).values(PAYMENT_METHODS);
+  const [edc] = await db
+    .insert(edcMachines)
+    .values({
+      bankName: "EDC",
+      terminalId: null,
+      label: "EDC",
+      isActive: true,
+      sortOrder: 10,
+    })
+    .returning();
 
-  console.log(`   ✅ ${PAYMENT_METHODS.length} payment methods inserted.\n`);
+  await db.insert(paymentMethods).values(
+    PAYMENT_METHODS.map((method) => ({
+      name: method.name,
+      type: method.type,
+      edcMethod: method.edcMethod,
+      edcMachineId: method.type === "edc" ? edc.id : null,
+      provider: method.provider,
+      accountInfo: null,
+      isActive: true,
+      sortOrder: method.sortOrder,
+    }))
+  );
+
+  console.log("   ✅ Payment methods inserted: Cash, EDC Debit Card, EDC Credit Card, EDC QRIS.\n");
 }
 
 async function seedStockTransactionTypes() {
@@ -334,25 +354,75 @@ async function seedStockTransactionTypes() {
 }
 
 async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
-  console.log("🌱 Seeding events, items, stock, and transactions...\n");
+  console.log("🌱 Seeding 3 events, items, stock, cashiers, and transactions...\n");
+
+  let globalTransactionSequence = 1;
 
   for (const seedEvent of SEED_EVENTS) {
     const startDate = dateFromOffset(seedEvent.startOffsetDays);
-    const endDate = dateFromOffset(
-      seedEvent.startOffsetDays + seedEvent.durationDays
-    );
+    const endDate = dateFromOffset(seedEvent.startOffsetDays + seedEvent.durationDays);
 
     const [event] = await db
       .insert(events)
       .values({
         name: seedEvent.name,
         location: seedEvent.location,
-        description: `Seeded event for dashboard testing: ${seedEvent.name}`,
+        description: `Seeded ${seedEvent.status} event for dashboard testing: ${seedEvent.name}`,
         status: seedEvent.status,
         startDate,
         endDate,
       })
       .returning();
+
+    await db.insert(eventReceiptTemplates).values({
+      eventId: event.id,
+      isActive: true,
+      storeName: event.name,
+      headline: "Official Event Receipt",
+      address: event.location,
+      phone: "+62 812-0000-0000",
+      instagram: "@sport.event",
+      footerText: "Terima kasih sudah berbelanja!",
+      returnPolicy: "Barang yang sudah dibeli tidak dapat dikembalikan.",
+      promoMessage: seedEvent.status === "active" ? "Follow kami untuk info promo berikutnya." : null,
+      showEventName: true,
+      showCashierName: true,
+      showItemSku: true,
+      showPaymentReference: true,
+      showDiscountBreakdown: true,
+    });
+
+
+    const [cashierSession] = await db
+      .insert(cashierSessions)
+      .values({
+        eventId: event.id,
+        cashierName:
+          seedEvent.status === "draft"
+            ? "Draft Cashier"
+            : seedEvent.status === "closed"
+              ? "Closed Event Cashier"
+              : "Active Event Cashier",
+        openingCash: "1000000",
+        closingCash: seedEvent.status === "closed" ? "1500000" : null,
+        openedAt: startDate,
+        closedAt: seedEvent.status === "closed" ? endDate : null,
+        notes: `Seeded ${seedEvent.status} cashier session`,
+      })
+      .returning();
+
+    await db.insert(cashDrawerCounts).values({
+      eventId: event.id,
+      cashierSessionId: cashierSession.id,
+      countedBy: cashierSession.cashierName,
+      expectedCash: "1000000",
+      actualCash: "1000000",
+      difference: "0",
+      reason: "opening_check",
+      notes: "Initial seeded drawer count",
+      countedAt: startDate,
+    });
+
 
     const stockMultiplier =
       seedEvent.status === "closed"
@@ -361,7 +431,7 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
           ? 1.15
           : 1;
 
-    const eventItemRows = BASE_ITEMS.map((item, index) => {
+    const eventItemRows = BASE_ITEMS.map((item) => {
       const stock = Math.max(
         10,
         Math.round(item.stock * stockMultiplier + randomInt(-5, 8))
@@ -373,7 +443,7 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
 
       return {
         eventId: event.id,
-        itemId: `${item.itemId}-${event.id}`,
+        itemId: item.itemId,
         baseItemNo: item.baseItemNo,
         name: item.name,
         color: item.color,
@@ -405,12 +475,10 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
     let transactionCreated = 0;
 
     for (let i = 0; i < seedEvent.transactionCount; i++) {
-      const availableItems = insertedItems.filter((item) => item.stock > 0);
-
+      const availableItems = insertedItems.filter((item) => Number(item.stock) > 0);
       if (availableItems.length === 0) break;
 
       const selectedItems = pickMany(availableItems, randomInt(1, 4));
-
       const lines = [];
 
       for (const item of selectedItems) {
@@ -444,28 +512,30 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
         0
       );
 
-      const discount = lines.reduce(
-        (sum, line) => sum + line.discountAmt,
-        0
-      );
-
-      const finalAmount = lines.reduce(
-        (sum, line) => sum + line.subtotal,
-        0
-      );
+      const discount = lines.reduce((sum, line) => sum + line.discountAmt, 0);
+      const finalAmount = lines.reduce((sum, line) => sum + line.subtotal, 0);
 
       const method = pickOne(PAYMENT_METHODS).name;
-      const createdAt = randomDateBetween(startDate, new Date());
+      const reference = paymentReference(method);
+      const { cashTendered, changeAmount } = buildCashValues(method, finalAmount);
+      const createdAt = randomDateBetween(startDate, seedEvent.status === "closed" ? endDate : new Date());
+      const displayId = createDisplayId(createdAt, globalTransactionSequence++);
+      const clientTxnId = displayId;
 
       const [txn] = await db
         .insert(transactions)
         .values({
+          displayId,
           eventId: event.id,
+          clientTxnId,
+          cashierSessionId: cashierSession.id,
           totalAmount: String(totalAmount),
           discount: String(discount),
           finalAmount: String(finalAmount),
+          cashTendered: cashTendered != null ? String(cashTendered) : null,
+          changeAmount: changeAmount != null ? String(changeAmount) : null,
           paymentMethod: method,
-          paymentReference: paymentReference(method),
+          paymentReference: reference,
           createdAt,
         })
         .returning();
@@ -474,9 +544,7 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
         lines.map((line) => ({
           transactionId: txn.id,
           eventItemId: line.item.id,
-          productName: `${line.item.name}${
-            line.item.variantCode ? ` (${line.item.variantCode})` : ""
-          }`,
+          productName: `${line.item.name}${line.item.variantCode ? ` (${line.item.variantCode})` : ""}`,
           itemId: line.item.itemId,
           quantity: line.quantity,
           unitPrice: String(line.unitPrice),
@@ -490,7 +558,7 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
       await db.insert(payments).values({
         transactionId: txn.id,
         method,
-        reference: paymentReference(method),
+        reference,
         paidAt: createdAt,
       });
 
@@ -506,28 +574,62 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
             stockBefore,
             stockAfter,
             transactionId: txn.id,
-            note: `Sale #${txn.id}`,
+            note: `Sale #${displayId}`,
             referenceType: "transaction",
-            referenceId: String(txn.id),
+            referenceId: displayId,
             createdAt,
           };
         })
       );
 
+      /**
+       * Add some print logs so receipt print count appears in the history/event pages.
+       * First print = original. Occasional second print = reprint.
+       */
+      await db.insert(receiptPrintLogs).values({
+        transactionId: txn.id,
+        printType: "original",
+        printedBy: cashierSession.cashierName,
+        printedAt: createdAt,
+      });
+
+      if (Math.random() < 0.2) {
+        await db.insert(receiptPrintLogs).values({
+          transactionId: txn.id,
+          printType: "reprint",
+          printedBy: cashierSession.cashierName,
+          printedAt: new Date(createdAt.getTime() + randomInt(2, 60) * 60_000),
+        });
+      }
+
       transactionCreated++;
+    }
+
+
+    if (transactionCreated > 0) {
+      const expectedCashAfterSales = 1000000 + transactionCreated * 250000;
+      await db.insert(cashDrawerCounts).values({
+        eventId: event.id,
+        cashierSessionId: cashierSession.id,
+        countedBy: cashierSession.cashierName,
+        expectedCash: String(expectedCashAfterSales),
+        actualCash: String(expectedCashAfterSales),
+        difference: "0",
+        reason: seedEvent.status === "closed" ? "closing_check" : "count",
+        notes: "Seeded drawer count after sales",
+        countedAt: seedEvent.status === "closed" ? endDate : new Date(),
+      });
     }
 
     for (const item of insertedItems) {
       await db
         .update(eventItems)
-        .set({
-          stock: Number(item.stock),
-        })
+        .set({ stock: Number(item.stock) })
         .where(sql`${eventItems.id} = ${item.id}`);
     }
 
     console.log(
-      `   ✅ ${event.name}: ${insertedItems.length} items, ${transactionCreated} transactions`
+      `   ✅ ${event.name} (${event.status}): ${insertedItems.length} items, ${transactionCreated} transactions`
     );
   }
 
@@ -536,22 +638,19 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
 
 async function main() {
   console.log("====================================");
-  console.log("  POS System — Large Dashboard Seeder");
+  console.log("  POS System — Clean Seeder");
   console.log("====================================\n");
 
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is missing in .env.local");
-  }
-
   await resetSeedData();
-  await seedPaymentMethods();
+  await seedPaymentData();
 
   const stockTypeIds = await seedStockTransactionTypes();
-
   await seedEventsAndSales(stockTypeIds);
 
-  console.log("🎉 Large seed complete!");
-  console.log("   Open your dashboard to test many events and charts.");
+  console.log("🎉 Seed complete!");
+  console.log("   Created exactly 3 events: active, closed, draft.");
+  console.log("   Payment methods: Cash + EDC Debit Card/Credit Card/QRIS.");
+  console.log("   Transaction IDs use yyyyMM00001 format.");
   process.exit(0);
 }
 

@@ -2,40 +2,43 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
   Banknote,
   BarChart2,
+  Building2,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CloudUpload,
   CreditCard,
   Database,
   DollarSign,
+  History,
   LogOut,
   MapPin,
   Minus,
   Package,
   Plus,
   Power,
-  QrCode,
+  Printer,
   RefreshCw,
   ScanLine,
   ShoppingBag,
   Tag,
   Trash2,
   TrendingUp,
-  Wallet,
   Wifi,
   WifiOff,
   X,
   Zap,
 } from "lucide-react";
-import { formatRupiah } from "@/lib/utils";
+import { formatRupiah, suggestedCashAmounts, calculateChange, formatRupiahInput, parseRupiahInput } from "@/lib/utils";
+import { usePrintReceipt, type EventReceiptTemplate } from "@/lib/hooks/usePrintReceipt";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -57,11 +60,15 @@ type CartItem = {
   promoApplied: string | null; freeQty: number;
 };
 
-type PayMethod = { id: number; name: string; type: string; provider: string | null };
+// ── PayMethod now includes EDC sub-type fields ─────────────────────────────
+type PayMethod = {
+  id: number; name: string; type: string;
+  edcMethod: string | null; edcMachineId: number | null;
+  provider: string | null;
+};
 
 type PromoRes = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
 
-// Full promo shape returned by getPromosByEvent (stored in local SQLite as JSON)
 type PromoTier = { minQty: number; discountPct?: string | null; discountFix?: string | null; fixedPrice?: string | null };
 type PromoItemLink = { eventItemId: number; itemId?: string; name?: string };
 type PromoData = {
@@ -84,14 +91,26 @@ type DailyStats = {
   totalUnits: number; totalItems: number;
 };
 
+// ── Grouped EDC structure for display ────────────────────────────────────────
+type EdcGroup = {
+  machineId: number | null;
+  machineLabel: string;
+  methods: PayMethod[];
+};
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PAY_ICON: Record<string, React.ReactNode> = {
-  cash: <Banknote size={16} />, qris: <QrCode size={16} />,
-  debit: <CreditCard size={16} />, credit: <CreditCard size={16} />, ewallet: <Wallet size={16} />,
+  cash:    <Banknote size={16} />,
+  edc:     <CreditCard size={16} />,
+  debit:   <CreditCard size={16} />,
+  credit:  <CreditCard size={16} />,
 };
 const PAY_COLOR: Record<string, string> = {
-  cash: "#16a34a", qris: "#7c3aed", debit: "#0369a1", credit: "#b45309", ewallet: "#be185d",
+  cash:    "#16a34a",
+  edc:     "#0369a1",
+  debit:   "#0369a1",
+  credit:  "#b45309",
 };
 const STATUS_STYLE: Record<string, { dot: string; label: string; border: string; bg: string }> = {
   active: { dot: "#16a34a", label: "Live",   border: "rgba(22,163,74,0.30)",  bg: "rgba(22,163,74,0.06)"  },
@@ -106,10 +125,21 @@ const KEYFRAMES = `
 
 function money(v: number | string) { return formatRupiah(v); }
 function makeClientTxnId(eventId: number) {
-  const r = typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `LOCAL-EV${eventId}-${r}`;
+  /**
+   * Local POS transaction ID shown to cashier/customer.
+   * Format: yyyyMM + 5-digit sequence, e.g. 20260500001.
+   *
+   * The sequence is stored per event + month in localStorage because local POS
+   * runs in the browser while offline.
+   */
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const prefix = `${yyyy}${mm}`;
+  const key = `pos:txn-seq:${eventId}:${prefix}`;
+  const next = Number(localStorage.getItem(key) ?? "0") + 1;
+  localStorage.setItem(key, String(next));
+  return `${prefix}${String(next).padStart(5, "0")}`;
 }
 function stockTone(stock: number) {
   if (stock < 0) return "#ef4444";
@@ -118,12 +148,11 @@ function stockTone(stock: number) {
 }
 
 // ── Client-side promo engine ──────────────────────────────────────────────────
-// Mirrors lib/promos.ts calculatePromo — runs fully offline from bundle data.
 
 function calculatePromoClient(
   item: EventItem,
   quantity: number,
-  cartSubtotal: number,  // current cart total excl. this item (for spend_get_free)
+  cartSubtotal: number,
   allPromos: PromoData[]
 ): PromoRes {
   const netPrice = Number(item.netPrice);
@@ -140,15 +169,12 @@ function calculatePromoClient(
   let best = { ...base };
 
   for (const promo of applicable) {
-    // Flash sale window check
     if (promo.type === "flash") {
       const now = Date.now();
       if (promo.flashStartTime && now < new Date(promo.flashStartTime).getTime()) continue;
       if (promo.flashEndTime   && now > new Date(promo.flashEndTime).getTime())   continue;
     }
-    // Min purchase qty
     if (promo.minPurchaseQty && quantity < promo.minPurchaseQty) continue;
-    // Max usage
     if (promo.maxUsageCount !== null && promo.usageCount >= (promo.maxUsageCount ?? Infinity)) continue;
 
     let result = { ...base };
@@ -234,50 +260,76 @@ function calculatePromoClient(
 // ── Main component ────────────────────────────────────────────────────────────
 
 function POSInner() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const queryEventId = searchParams.get("event") ? Number(searchParams.get("event")) : null;
   const forceSelect  = searchParams.get("select") === "1";
 
-  const [events,          setEvents]          = useState<EventRow[]>([]);
-  const [event,           setEvent]           = useState<EventRow | null>(null);
-  const [items,           setItems]           = useState<EventItem[]>([]);
-  const [promos,          setPromos]          = useState<PromoData[]>([]);
-  const [promoCount,      setPromoCount]      = useState(0);
-  const [cart,            setCart]            = useState<CartItem[]>([]);
-  const [screen,          setScreen]          = useState<Screen>("event-select");
+  const [events,           setEvents]           = useState<EventRow[]>([]);
+  const [event,            setEvent]            = useState<EventRow | null>(null);
+  const [items,            setItems]            = useState<EventItem[]>([]);
+  const [promos,           setPromos]           = useState<PromoData[]>([]);
+  const [promoCount,       setPromoCount]       = useState(0);
+  const [cart,             setCart]             = useState<CartItem[]>([]);
+  const [screen,           setScreen]           = useState<Screen>("event-select");
 
-  const [query,           setQuery]           = useState("");
-  const [suggestions,     setSuggestions]     = useState<EventItem[]>([]);
-  const [searchFocused,   setSearchFocused]   = useState(false);
+  const [query,            setQuery]            = useState("");
+  const [suggestions,      setSuggestions]      = useState<EventItem[]>([]);
+  const [searchFocused,    setSearchFocused]    = useState(false);
 
-  const [payMethods,      setPayMethods]      = useState<PayMethod[]>([]);
-  const [payMethod,       setPayMethod]       = useState<PayMethod | null>(null);
-  const [reference,       setReference]       = useState("");
+  const [payMethods,       setPayMethods]       = useState<PayMethod[]>([]);
+  const [payMethod,        setPayMethod]        = useState<PayMethod | null>(null);
+  const [reference,        setReference]        = useState("");
 
-  const [lastTxn,         setLastTxn]         = useState<string | number | null>(null);
-  const [processing,      setProcessing]      = useState(false);
+  // ── Cash payment state ─────────────────────────────────────────────────────
+  const [cashTendered,     setCashTendered]     = useState<string>("");
 
-  const [toast,           setToast]           = useState<string | null>(null);
-  const [toastErr,        setToastErr]        = useState(false);
+  const [lastTxn,          setLastTxn]          = useState<string | number | null>(null);
+  const [processing,       setProcessing]       = useState(false);
 
-  const [online,          setOnline]          = useState(true);
-  const [preparing,       setPreparing]       = useState(false);
-  const [syncing,         setSyncing]         = useState(false);
-  const [pendingSyncCount,setPendingSyncCount] = useState(0);
-  const [localReady,      setLocalReady]      = useState(false);
+  const [toast,            setToast]            = useState<string | null>(null);
+  const [toastErr,         setToastErr]         = useState(false);
 
-  const [preparedEvents,  setPreparedEvents]  = useState<{
+  const [online,           setOnline]           = useState(true);
+  const [preparing,        setPreparing]        = useState(false);
+  const [syncing,          setSyncing]          = useState(false);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [localReady,       setLocalReady]       = useState(false);
+
+  const [preparedEvents,   setPreparedEvents]   = useState<{
     id: number; name: string; status: string; location: string | null;
     preparedAt: string; pendingSyncCount: number;
   }[]>([]);
 
-  const [actionDialog,    setActionDialog]    = useState<POSActionDialog>(null);
-  const [actionLoading,   setActionLoading]   = useState(false);
-  const [actionError,     setActionError]     = useState("");
+  const [actionDialog,     setActionDialog]     = useState<POSActionDialog>(null);
+  const [actionLoading,    setActionLoading]    = useState(false);
+  const [actionError,      setActionError]      = useState("");
 
-  const [showReport,      setShowReport]      = useState(false);
-  const [dailyStats,      setDailyStats]      = useState<DailyStats | null>(null);
-  const [loadingStats,    setLoadingStats]    = useState(false);
+  const [showReport,       setShowReport]       = useState(false);
+  const [dailyStats,       setDailyStats]       = useState<DailyStats | null>(null);
+  const [loadingStats,     setLoadingStats]     = useState(false);
+
+  // Expanded EDC groups in payment panel
+  const [expandedEdcGroups, setExpandedEdcGroups] = useState<Set<string>>(new Set());
+
+  const { printReceipt, printing } = usePrintReceipt();
+  const [receiptTemplate, setReceiptTemplate] = useState<EventReceiptTemplate | null>(null);
+
+  const [showDrawerCount, setShowDrawerCount] = useState(false);
+  const [drawerActual, setDrawerActual] = useState("");
+  const [drawerNotes, setDrawerNotes] = useState("");
+  const [drawerExpected, setDrawerExpected] = useState(0);
+  const [drawerSessionId, setDrawerSessionId] = useState<number | null>(null);
+  const [drawerCashierName, setDrawerCashierName] = useState<string | null>(null);
+  const [drawerSaving, setDrawerSaving] = useState(false);
+
+  const [lastTxnSnapshot, setLastTxnSnapshot] = useState<{
+    txnId: string; cart: CartItem[]; payMethod: PayMethod | null;
+    subtotal: number; discount: number; total: number;
+    cashTendered: number | null; changeAmount: number | null;
+    receiptTemplate?: EventReceiptTemplate | null;
+    eventName?: string | null;
+  } | null>(null);
 
   const scanRef = useRef<HTMLInputElement>(null);
 
@@ -286,11 +338,34 @@ function POSInner() {
   const total     = useMemo(() => cart.reduce((s, i) => s + i.finalPrice  * i.quantity, 0), [cart]);
   const itemCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
-  const groupedPaymentMethods = useMemo(() =>
-    Object.entries(payMethods.reduce<Record<string, PayMethod[]>>((acc, m) => {
-      acc[m.type] = [...(acc[m.type] ?? []), m]; return acc;
-    }, {})),
-  [payMethods]);
+  // ── Cash change computation ────────────────────────────────────────────────
+  const isCash          = payMethod?.type === "cash";
+  const cashTenderedNum = isCash ? (parseFloat(cashTendered) || 0) : 0;
+  const changeNum       = isCash ? calculateChange(cashTenderedNum, total) : 0;
+  const cashSuggestions = isCash && total > 0 ? suggestedCashAmounts(total) : [];
+
+  // ── EDC grouping ───────────────────────────────────────────────────────────
+  // Group EDC payment methods by their edcMachineId for nested display.
+  const { cashMethods, edcGroups } = useMemo(() => {
+    const cash    = payMethods.filter(m => m.type === "cash");
+    const edcRows = payMethods.filter(m => m.type === "edc");
+
+    // Group by machineId, preserving order of first appearance
+    const groupMap = new Map<string, EdcGroup>();
+    for (const m of edcRows) {
+      const key = m.edcMachineId != null ? String(m.edcMachineId) : "unassigned";
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          machineId:    m.edcMachineId,
+          machineLabel: m.provider ?? `EDC Machine`,
+          methods:      [],
+        });
+      }
+      groupMap.get(key)!.methods.push(m);
+    }
+
+    return { cashMethods: cash, edcGroups: [...groupMap.values()] };
+  }, [payMethods]);
 
   function flash(msg: string, err = false) {
     setToast(msg); setToastErr(err);
@@ -306,12 +381,32 @@ function POSInner() {
     } catch { setPreparedEvents([]); }
   }
 
+  async function loadReceiptTemplate(eventId: number) {
+    try {
+      const res = await fetch(`/api/events/${eventId}/receipt-template`, { cache: "no-store" });
+      const data = await res.json();
+      setReceiptTemplate(res.ok ? data : null);
+      return res.ok ? data as EventReceiptTemplate : null;
+    } catch {
+      setReceiptTemplate(null);
+      return null;
+    }
+  }
+
   function applyBundle(bundle: LocalBundle) {
     setEvent(bundle.event);
     setItems(bundle.items);
     setPromos(bundle.promos as PromoData[]);
     setPayMethods(bundle.paymentMethods);
     setPromoCount(bundle.promos.length);
+    void loadReceiptTemplate(bundle.event.id);
+    // Auto-expand all EDC groups on load
+    const edcRows = bundle.paymentMethods.filter(m => m.type === "edc");
+    const keys = new Set<string>();
+    for (const m of edcRows) {
+      keys.add(m.edcMachineId != null ? String(m.edcMachineId) : "unassigned");
+    }
+    setExpandedEdcGroups(keys);
   }
 
   async function loadLocalBundle(eventId: number) {
@@ -385,7 +480,7 @@ function POSInner() {
     finally { setLoadingStats(false); }
   }
 
-  // ── Promo calculation (client-side, offline-capable) ─────────────────────
+  // ── Promo calculation ─────────────────────────────────────────────────────
 
   function getPromo(item: EventItem, qty: number, currentCartSubtotal = 0): PromoRes {
     return calculatePromoClient(item, qty, currentCartSubtotal, promos);
@@ -396,7 +491,6 @@ function POSInner() {
   async function addItem(item: EventItem) {
     const existingQty = cart.find(r => r.eventItemId === item.id)?.quantity ?? 0;
     const newQty = existingQty + 1;
-    // Cart subtotal excluding this item's contribution
     const otherSubtotal = cart
       .filter(r => r.eventItemId !== item.id)
       .reduce((s, r) => s + r.finalPrice * r.quantity, 0);
@@ -441,29 +535,73 @@ function POSInner() {
     if (suggestions.length === 0) flash("Product not found.", true);
   }
 
+  // ── Payment ───────────────────────────────────────────────────────────────
+
   async function confirmPayment() {
     if (!event || !payMethod || cart.length === 0) return;
+
+    // Validate cash: tendered must be >= total
+    if (isCash && cashTenderedNum < total) {
+      flash("Cash tendered is less than the total amount.", true);
+      return;
+    }
+
     setProcessing(true);
     try {
-      const label      = `${payMethod.name}${payMethod.provider ? ` (${payMethod.provider})` : ""}`;
+      const label       = `${payMethod.name}${payMethod.provider ? ` (${payMethod.provider})` : ""}`;
       const clientTxnId = makeClientTxnId(event.id);
+
+      const tenderedVal = isCash && cashTenderedNum > 0 ? cashTenderedNum : null;
+      const changeVal   = isCash && cashTenderedNum > 0 ? changeNum : null;
+
       const payload = {
-        clientTxnId, totalAmount: subtotal, discount, finalAmount: total,
-        paymentMethod: label, paymentReference: reference || null,
-        createdAt: new Date().toISOString(),
+        clientTxnId,
+        totalAmount:      subtotal,
+        discount,
+        finalAmount:      total,
+        paymentMethod:    label,
+        paymentReference: reference || null,
+        cashTendered:     tenderedVal,
+        changeAmount:     changeVal,
+        createdAt:        new Date().toISOString(),
         items: cart.map(it => ({
-          eventItemId: it.eventItemId, itemId: it.itemId, productName: it.productName,
-          quantity: it.quantity, unitPrice: it.unitPrice, discountAmt: it.discountAmt,
-          finalPrice: it.finalPrice, subtotal: it.finalPrice * it.quantity, promoApplied: it.promoApplied,
+          eventItemId:  it.eventItemId,
+          itemId:       it.itemId,
+          productName:  it.productName,
+          quantity:     it.quantity,
+          unitPrice:    it.unitPrice,
+          discountAmt:  it.discountAmt,
+          finalPrice:   it.finalPrice,
+          subtotal:     it.finalPrice * it.quantity,
+          promoApplied: it.promoApplied,
         })),
       };
-      const res   = await fetch(`/api/local/events/${event.id}/transactions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+
+      const res   = await fetch(`/api/local/events/${event.id}/transactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       const saved = await res.json();
       if (!res.ok) throw new Error(saved.error || "Failed to save transaction.");
+
       const fresh = await loadLocalBundle(event.id);
       if (fresh) setItems(fresh.items);
       await refreshPendingCount(event.id);
+
       setLastTxn(saved.clientTxnId ?? clientTxnId);
+      setLastTxnSnapshot({
+        txnId:        saved.clientTxnId ?? clientTxnId,
+        cart:         [...cart],
+        payMethod:    payMethod,
+        subtotal,
+        discount,
+        total,
+        cashTendered: tenderedVal,
+        changeAmount: changeVal,
+        receiptTemplate,
+        eventName: event.name,
+      });
       setScreen("success");
     } catch (e) { flash(e instanceof Error ? e.message : "Failed to save local transaction.", true); }
     finally { setProcessing(false); }
@@ -483,7 +621,7 @@ function POSInner() {
       }
       localStorage.removeItem("pos:last-event-id");
       setActionDialog(null); setActionError("");
-      window.location.href = "/pos?select=1";
+      router.push("/pos?select=1");
     } catch (e) { setActionError(e instanceof Error ? e.message : "Failed to turn off local POS."); }
     finally { setActionLoading(false); }
   }
@@ -500,13 +638,13 @@ function POSInner() {
       }
       localStorage.removeItem("pos:last-event-id");
       setActionDialog(null); setActionError("");
-      window.location.href = "/events";
+      router.push("/events");
     } catch (e) { setActionError(e instanceof Error ? e.message : "Failed to delete event."); }
     finally { setActionLoading(false); }
   }
 
   function nextTransaction() {
-    setCart([]); setPayMethod(null); setReference(""); setQuery(""); setScreen("sell");
+    setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery(""); setScreen("sell");
   }
 
   // ── Effects ───────────────────────────────────────────────────────────────
@@ -518,7 +656,6 @@ function POSInner() {
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
   }, []);
 
-  // Auto-sync when coming back online
   useEffect(() => {
     if (!online || !event?.id || pendingSyncCount === 0 || syncing) return;
     const t = setTimeout(() => syncLocalTransactions(event.id), 1500);
@@ -567,6 +704,11 @@ function POSInner() {
       (it.variantCode ?? "").toLowerCase().includes(q) || (it.color ?? "").toLowerCase().includes(q)
     ).slice(0, 24));
   }, [query, items]);
+
+  // Reset cash tendered when switching payment method
+  useEffect(() => {
+    setCashTendered("");
+  }, [payMethod]);
 
   // ── Sub-components ────────────────────────────────────────────────────────
 
@@ -652,9 +794,8 @@ function POSInner() {
           ) : (
             <div className="space-y-2">
               {suggestions.map(item => {
-                const inCart  = cart.find(r => r.eventItemId === item.id);
-                const stock   = Number(item.stock ?? 0);
-                // Preview promo for qty=1 (or existing+1)
+                const inCart     = cart.find(r => r.eventItemId === item.id);
+                const stock      = Number(item.stock ?? 0);
                 const previewQty = (inCart?.quantity ?? 0) + 1;
                 const otherSub   = cart.filter(r => r.eventItemId !== item.id).reduce((s, r) => s + r.finalPrice * r.quantity, 0);
                 const preview    = calculatePromoClient(item, previewQty, otherSub, promos);
@@ -675,7 +816,6 @@ function POSInner() {
                         <p className="text-sm font-black truncate" style={{ color: "#111827" }}>{item.name}</p>
                         <p className="text-xs font-mono mt-0.5 truncate" style={{ color: "#9ca3af" }}>{item.itemId}{item.variantCode ? ` · ${item.variantCode}` : ""}</p>
                         {item.color && <p className="text-xs truncate" style={{ color: "#9ca3af" }}>{item.color}</p>}
-                        {/* Promo badge */}
                         {hasDiscount && preview.promoName && (
                           <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
                             style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}>
@@ -711,11 +851,50 @@ function POSInner() {
     );
   }
 
+  // ── Payment Success Overlay ───────────────────────────────────────────────
+
   function PaymentSuccessOverlay() {
     if (screen !== "success") return null;
+    const snap         = lastTxnSnapshot;
+    const snapCart     = snap?.cart      ?? cart;
+    const snapPay      = snap?.payMethod ?? payMethod;
+    const snapSubtotal = snap?.subtotal  ?? subtotal;
+    const snapDiscount = snap?.discount  ?? discount;
+    const snapTotal    = snap?.total     ?? total;
+    const snapQty      = snapCart.reduce((s, i) => s + i.quantity, 0);
+    const snapCashTendered = snap?.cashTendered ?? null;
+    const snapChange       = snap?.changeAmount ?? null;
+
+    async function handlePrintSuccess() {
+      if (!snap) return;
+      const txnForPrint = {
+        clientTxnId:      snap.txnId,
+        totalAmount:      String(snap.subtotal),
+        discount:         String(snap.discount),
+        finalAmount:      String(snap.total),
+        paymentMethod:    snapPay?.name ?? "—",
+        paymentReference: null,
+        cashTendered:     snap.cashTendered != null ? String(snap.cashTendered) : null,
+        changeAmount:     snap.changeAmount  != null ? String(snap.changeAmount)  : null,
+        createdAt:        new Date().toISOString(),
+      };
+      const itemsForPrint = snap.cart.map(it => ({
+        productName:  it.productName,
+        quantity:     it.quantity,
+        unitPrice:    String(it.unitPrice),
+        discountAmt:  String(it.discountAmt),
+        finalPrice:   String(it.finalPrice),
+        subtotal:     String(it.finalPrice * it.quantity),
+        promoApplied: it.promoApplied,
+      }));
+      await printReceipt(txnForPrint, itemsForPrint, { template: snap.receiptTemplate ?? receiptTemplate, eventName: snap.eventName ?? event?.name });
+    }
+
     return (
       <ModalShell onClose={nextTransaction}>
         <div className="w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background: "white" }}>
+
+          {/* Header */}
           <div className="px-6 pt-7 pb-5 text-center" style={{ borderBottom: "2px dashed #e5e7eb" }}>
             <div className="w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center" style={{ background: "rgba(22,163,74,0.10)" }}>
               <CheckCircle2 size={28} style={{ color: "#16a34a" }} />
@@ -724,12 +903,15 @@ function POSInner() {
             <p className="text-xs font-mono mt-1" style={{ color: "#9ca3af" }}>{String(lastTxn)}</p>
             <p className="text-[11px] mt-2" style={{ color: "#9ca3af" }}>Sale saved locally. Sync will run when internet is stable.</p>
           </div>
-          <div className="px-6 py-4 space-y-2 max-h-64 overflow-y-auto" style={{ borderBottom: "1px solid #f3f4f6" }}>
-            {cart.map(item => (
+
+          {/* Line items */}
+          <div className="px-6 py-4 space-y-2 max-h-48 overflow-y-auto" style={{ borderBottom: "1px solid #f3f4f6" }}>
+            {snapCart.map(item => (
               <div key={item.eventItemId} className="flex justify-between items-start gap-3">
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-bold truncate" style={{ color: "#111827" }}>
-                    {item.productName}{item.variantCode && <span style={{ color: "#9ca3af" }}> ({item.variantCode})</span>}
+                    {item.productName}
+                    {item.variantCode && <span style={{ color: "#9ca3af" }}> ({item.variantCode})</span>}
                   </p>
                   <p className="text-xs font-mono" style={{ color: "#9ca3af" }}>{money(item.finalPrice)} × {item.quantity}</p>
                   {item.promoApplied && (
@@ -739,26 +921,193 @@ function POSInner() {
                     </span>
                   )}
                 </div>
-                <p className="text-xs font-black font-mono" style={{ color: "#111827" }}>{money(item.finalPrice * item.quantity)}</p>
+                <p className="text-xs font-black font-mono flex-shrink-0" style={{ color: "#111827" }}>
+                  {money(item.finalPrice * item.quantity)}
+                </p>
               </div>
             ))}
           </div>
-          <div className="px-6 py-4">
-            {discount > 0 && <div className="flex justify-between text-xs mb-1"><span style={{ color: "#9ca3af" }}>Subtotal</span><span className="font-mono" style={{ color: "#9ca3af" }}>{money(subtotal)}</span></div>}
-            {discount > 0 && <div className="flex justify-between text-xs mb-2"><span style={{ color: "#16a34a" }}>Discount</span><span className="font-mono" style={{ color: "#16a34a" }}>−{money(discount)}</span></div>}
-            <div className="flex justify-between items-baseline">
-              <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</span>
-              <span className="text-3xl font-black" style={{ color: "#111827" }}>{money(total)}</span>
+
+          {/* Totals */}
+          <div className="px-6 py-4" style={{ borderBottom: "1px solid #f3f4f6" }}>
+            <div className="flex justify-between text-xs mb-2">
+              <span style={{ color: "#9ca3af" }}>Total Items</span>
+              <span className="font-bold" style={{ color: "#374151" }}>{snapQty} unit{snapQty !== 1 ? "s" : ""}</span>
             </div>
-            <p className="text-xs mt-1" style={{ color: "#9ca3af" }}>via {payMethod?.name}{payMethod?.provider ? ` · ${payMethod.provider}` : ""}</p>
+            {snapDiscount > 0 && (
+              <>
+                <div className="flex justify-between text-xs mb-1">
+                  <span style={{ color: "#9ca3af" }}>Subtotal</span>
+                  <span className="font-mono" style={{ color: "#9ca3af" }}>{money(snapSubtotal)}</span>
+                </div>
+                <div className="flex justify-between text-xs mb-2">
+                  <span style={{ color: "#16a34a" }}>Discount</span>
+                  <span className="font-mono" style={{ color: "#16a34a" }}>−{money(snapDiscount)}</span>
+                </div>
+              </>
+            )}
+            <div className="flex justify-between items-baseline pt-1" style={{ borderTop: snapDiscount > 0 ? "1px solid #f3f4f6" : "none" }}>
+              <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</span>
+              <span className="text-3xl font-black" style={{ color: "#111827" }}>{money(snapTotal)}</span>
+            </div>
+            <p className="text-xs mt-1" style={{ color: "#9ca3af" }}>
+              via {snapPay?.name}{snapPay?.provider ? ` · ${snapPay.provider}` : ""}
+            </p>
+
+            {/* Cash change section */}
+            {snapCashTendered != null && snapCashTendered > 0 && (
+              <div className="mt-3 rounded-2xl px-4 py-3" style={{ background: "rgba(3,105,161,0.06)", border: "1px solid rgba(3,105,161,0.15)" }}>
+                <div className="flex justify-between text-xs mb-1.5">
+                  <span style={{ color: "#6b7280" }}>Cash Tendered</span>
+                  <span className="font-mono font-bold" style={{ color: "#374151" }}>{money(snapCashTendered)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm font-bold" style={{ color: "#0369a1" }}>Change</span>
+                  <span className="text-2xl font-black" style={{ color: "#0369a1" }}>{money(snapChange ?? 0)}</span>
+                </div>
+              </div>
+            )}
           </div>
-          <div className="px-6 pb-6 flex gap-2">
-            <button onClick={nextTransaction} className="flex-1 rounded-2xl py-3.5 text-sm font-black" style={{ background: "var(--brand-orange)", color: "white" }}>Next Sale</button>
-            <button onClick={() => event?.id && syncLocalTransactions(event.id)} disabled={syncing || !online} className="px-4 rounded-2xl text-sm font-bold border disabled:opacity-40" style={{ borderColor: "#e5e7eb", color: "#0369a1", background: "white" }}>
-              {syncing ? "Syncing…" : "Sync"}
+
+          {/* Actions */}
+          <div className="px-6 pb-6 pt-4 flex gap-2">
+            <button onClick={nextTransaction}
+              className="flex-1 rounded-2xl py-3.5 text-sm font-black"
+              style={{ background: "var(--brand-orange)", color: "white" }}>
+              Next Sale
+            </button>
+            <button onClick={handlePrintSuccess} disabled={printing}
+              className="px-5 rounded-2xl text-sm font-bold border flex items-center gap-1.5 disabled:opacity-40"
+              style={{ borderColor: "#e5e7eb", color: "#374151", background: "white" }}>
+              <Printer size={14} />
+              {printing ? "Printing…" : "Print"}
             </button>
           </div>
         </div>
+      </ModalShell>
+    );
+  }
+
+
+  async function openDrawerCountModal() {
+    if (!event?.id) return;
+    setShowDrawerCount(true);
+    setDrawerActual("");
+    setDrawerNotes("");
+    setDrawerExpected(0);
+    setDrawerSessionId(null);
+    setDrawerCashierName(null);
+
+    try {
+      const res = await fetch(`/api/events/${event.id}/cash-drawer-counts`, { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) {
+        setDrawerExpected(Number(data.expectedCash ?? 0));
+        setDrawerSessionId(data.activeSession?.id ?? null);
+        setDrawerCashierName(data.activeSession?.cashierName ?? null);
+      }
+    } catch {
+      // Keep modal usable even when expected cash cannot be fetched.
+    }
+  }
+
+  async function saveDrawerCount(e: React.FormEvent) {
+    e.preventDefault();
+    if (!event?.id) return;
+
+    const actualCash = parseRupiahInput(drawerActual);
+    setDrawerSaving(true);
+
+    try {
+      const res = await fetch(`/api/events/${event.id}/cash-drawer-counts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cashierSessionId: drawerSessionId,
+          countedBy: drawerCashierName,
+          expectedCash: drawerExpected,
+          actualCash,
+          reason: "count",
+          notes: drawerNotes || null,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(json?.error ?? "Failed to save drawer count");
+
+      setShowDrawerCount(false);
+      setDrawerActual("");
+      setDrawerNotes("");
+      flash("Cash drawer count saved.");
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Failed to save drawer count", true);
+    } finally {
+      setDrawerSaving(false);
+    }
+  }
+
+  function CashDrawerCountModal() {
+    if (!showDrawerCount) return null;
+    const actualCash = parseRupiahInput(drawerActual);
+    const diff = actualCash - drawerExpected;
+
+    return (
+      <ModalShell onClose={() => setShowDrawerCount(false)}>
+        <form onSubmit={saveDrawerCount} className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background: "white" }}>
+          <div className="px-6 py-5" style={{ borderBottom: "1px solid #e5e7eb" }}>
+            <p className="text-lg font-black" style={{ color: "#111827" }}>Check Cash Drawer</p>
+            <p className="text-xs mt-1" style={{ color: "#6b7280" }}>
+              {drawerCashierName ? `Active cashier: ${drawerCashierName}` : "No active cashier session found"}
+            </p>
+          </div>
+
+          <div className="px-6 py-5 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl px-4 py-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Expected</p>
+                <p className="text-lg font-black mt-1" style={{ color: "#0369a1" }}>{money(drawerExpected)}</p>
+              </div>
+              <div className="rounded-2xl px-4 py-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Difference</p>
+                <p className="text-lg font-black mt-1" style={{ color: diff === 0 ? "#16a34a" : diff < 0 ? "#dc2626" : "#0369a1" }}>{money(diff)}</p>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Actual Cash Counted</label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black" style={{ color: "#9ca3af" }}>Rp</span>
+                <input
+                  required
+                  inputMode="numeric"
+                  value={drawerActual}
+                  onChange={(e) => setDrawerActual(formatRupiahInput(e.target.value))}
+                  placeholder="0"
+                  className="w-full rounded-2xl pl-12 pr-4 py-3 text-lg font-black focus:outline-none"
+                  style={{ border: "1px solid #e5e7eb", color: "#111827", background: "white" }}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Notes optional</label>
+              <textarea
+                value={drawerNotes}
+                onChange={(e) => setDrawerNotes(e.target.value)}
+                rows={3}
+                className="w-full rounded-2xl px-4 py-3 text-sm focus:outline-none"
+                style={{ border: "1px solid #e5e7eb", color: "#111827", background: "white" }}
+                placeholder="Example: after lunch rush, before shift handover, etc."
+              />
+            </div>
+          </div>
+
+          <div className="px-6 py-4 flex gap-2 justify-end" style={{ background: "#f9fafb", borderTop: "1px solid #e5e7eb" }}>
+            <button type="button" onClick={() => setShowDrawerCount(false)} disabled={drawerSaving} className="px-4 py-2.5 rounded-xl text-sm font-bold border disabled:opacity-50" style={{ background: "white", borderColor: "#e5e7eb", color: "#374151" }}>Cancel</button>
+            <button disabled={drawerSaving} className="px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50" style={{ background: "var(--brand-orange)", color: "white" }}>
+              {drawerSaving ? "Saving..." : "Save Count"}
+            </button>
+          </div>
+        </form>
       </ModalShell>
     );
   }
@@ -791,10 +1140,10 @@ function POSInner() {
                   <p className="text-[11px] font-bold uppercase tracking-widest mb-3" style={{ color: "#9ca3af" }}>Today</p>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { icon: <DollarSign size={14} />, label: "Revenue",      value: money(dailyStats.todayRevenue),                    color: "var(--brand-orange)", bg: "rgba(255,101,63,0.08)"  },
-                      { icon: <ShoppingBag size={14}/>, label: "Transactions", value: String(dailyStats.todayTxnCount),                  color: "#0369a1",             bg: "rgba(3,105,161,0.07)"   },
-                      { icon: <TrendingUp size={14} />, label: "Items Sold",   value: `${dailyStats.todayItemsSold} units`,              color: "#7c3aed",             bg: "rgba(124,58,237,0.08)"  },
-                      { icon: <Tag size={14} />,        label: "Discounts",    value: money(dailyStats.todayDiscount),                   color: "#16a34a",             bg: "rgba(22,163,74,0.07)"   },
+                      { icon: <DollarSign size={14} />, label: "Revenue",      value: money(dailyStats.todayRevenue),              color: "var(--brand-orange)", bg: "rgba(255,101,63,0.08)"  },
+                      { icon: <ShoppingBag size={14}/>, label: "Transactions", value: String(dailyStats.todayTxnCount),            color: "#0369a1",             bg: "rgba(3,105,161,0.07)"   },
+                      { icon: <TrendingUp size={14} />, label: "Items Sold",   value: `${dailyStats.todayItemsSold} units`,        color: "#7c3aed",             bg: "rgba(124,58,237,0.08)"  },
+                      { icon: <Tag size={14} />,        label: "Discounts",    value: money(dailyStats.todayDiscount),             color: "#16a34a",             bg: "rgba(22,163,74,0.07)"   },
                     ].map(({ icon, label, value, color, bg }) => (
                       <div key={label} className="rounded-xl p-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
                         <div className="w-6 h-6 rounded-lg flex items-center justify-center mb-2" style={{ background: bg, color }}>{icon}</div>
@@ -809,11 +1158,11 @@ function POSInner() {
                   <p className="text-[11px] font-bold uppercase tracking-widest mb-3" style={{ color: "#9ca3af" }}>Total Event Sales</p>
                   <div className="space-y-2">
                     {[
-                      { label: "Total Revenue",  value: money(dailyStats.revenue),             color: "var(--brand-orange)" },
-                      { label: "Transactions",   value: String(dailyStats.txnCount),           color: "#0369a1"             },
-                      { label: "Items Sold",     value: `${dailyStats.itemsSold} units`,       color: "#7c3aed"             },
-                      { label: "Total Discounts",value: money(dailyStats.discount),            color: "#16a34a"             },
-                      { label: "Total Stock",    value: String(dailyStats.totalUnits),         color: stockTone(dailyStats.totalUnits) },
+                      { label: "Total Revenue",  value: money(dailyStats.revenue),       color: "var(--brand-orange)" },
+                      { label: "Transactions",   value: String(dailyStats.txnCount),     color: "#0369a1"             },
+                      { label: "Items Sold",     value: `${dailyStats.itemsSold} units`, color: "#7c3aed"             },
+                      { label: "Total Discounts",value: money(dailyStats.discount),      color: "#16a34a"             },
+                      { label: "Total Stock",    value: String(dailyStats.totalUnits),   color: stockTone(dailyStats.totalUnits) },
                     ].map(({ label, value, color }) => (
                       <div key={label} className="flex items-center justify-between px-3 py-2.5 rounded-xl" style={{ background: "#f9fafb" }}>
                         <span className="text-xs" style={{ color: "#9ca3af" }}>{label}</span>
@@ -932,14 +1281,16 @@ function POSInner() {
 
   // ── Sell / success screen ─────────────────────────────────────────────────
 
-  const eventStyle    = STATUS_STYLE[event?.status ?? "draft"] ?? STATUS_STYLE.draft;
+  const eventStyle     = STATUS_STYLE[event?.status ?? "draft"] ?? STATUS_STYLE.draft;
   const needsReference = payMethod && payMethod.type !== "cash";
+  const canConfirm     = !!(payMethod && cart.length > 0 && (!isCash || cashTenderedNum >= total));
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background: "#fafaf8" }}>
       <style>{KEYFRAMES}</style>
       <POSActionModal />
       <PaymentSuccessOverlay />
+      <CashDrawerCountModal />
       <ReportDrawer />
 
       {toast && <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl pointer-events-none" style={{ background: toastErr ? "#ef4444" : "#16a34a", color: "white" }}>{toast}</div>}
@@ -953,6 +1304,18 @@ function POSInner() {
             {event?.location && <p className="hidden md:flex items-center gap-1 text-xs" style={{ color: "#9ca3af" }}><MapPin size={10}/>{event.location}</p>}
           </div>
         </div>
+
+        <button onClick={openDrawerCountModal}
+          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all"
+          style={{ color: "#0369a1", background: "rgba(3,105,161,0.06)", borderColor: "rgba(3,105,161,0.2)" }}>
+          <Banknote size={12}/><span className="hidden sm:inline">Drawer</span>
+        </button>
+
+        <button onClick={() => event?.id && (window.location.href = `/pos/history?event=${event.id}`)}
+          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all"
+          style={{ color: "white", background: "rgba(3,105,161)", borderColor: "rgba(3,105,161,0.2)" }}>
+          <History size={12}/><span className="hidden sm:inline">History</span>
+        </button>
 
         <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
           <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Status</span>
@@ -979,7 +1342,7 @@ function POSInner() {
           <button onClick={() => event?.id && prepareEventOffline(event.id)} disabled={preparing || !online} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all disabled:opacity-40" style={{ color: "#0369a1", background: "white", borderColor: "#e5e7eb" }}>
             {preparing ? <RefreshCw size={12} className="animate-spin"/> : <Database size={12}/>}<span className="hidden sm:inline">Refresh</span>
           </button>
-          <button onClick={() => { setCart([]); setPayMethod(null); setReference(""); setQuery(""); window.location.href = "/pos?select=1"; }} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#374151", background: "white", borderColor: "#e5e7eb" }}>Switch</button>
+          <button onClick={() => { setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery(""); router.push("/pos?select=1"); }} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#374151", background: "white", borderColor: "#e5e7eb" }}>Switch</button>
           <button onClick={() => { setActionError(""); setActionDialog("turn-off-local"); }} className="hidden md:flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#b45309", background: "white", borderColor: "#fde68a" }}>
             <Power size={12}/>Turn Off
           </button>
@@ -1034,7 +1397,6 @@ function POSInner() {
                       <div className="min-w-0">
                         <p className="text-sm font-black truncate" style={{ color: "#111827" }}>{item.productName}</p>
                         <p className="text-xs font-mono mt-0.5" style={{ color: "#9ca3af" }}>{item.itemId}{item.variantCode ? ` · ${item.variantCode}` : ""}</p>
-                        {/* Promo badge on cart row */}
                         {item.promoApplied && (
                           <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
                             style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}>
@@ -1088,22 +1450,23 @@ function POSInner() {
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
-            {groupedPaymentMethods.map(([type, methods]) => (
-              <div key={type}>
-                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black" style={{ color: "#9ca3af" }}>{type === "ewallet" ? "E-Wallet" : type}</p>
+
+            {/* ── Cash ─────────────────────────────────────────────────────── */}
+            {cashMethods.length > 0 && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black" style={{ color: "#9ca3af" }}>Cash</p>
                 <div className="space-y-1.5">
-                  {methods.map(method => {
+                  {cashMethods.map(method => {
                     const selected = payMethod?.id === method.id;
-                    const color    = PAY_COLOR[method.type] ?? "#374151";
+                    const color    = PAY_COLOR.cash;
                     return (
                       <button key={method.id} onClick={() => { setPayMethod(method); setReference(""); }} className="w-full flex items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-all"
                         style={{ background: selected ? `${color}0D` : "#f9fafb", border: selected ? `1.5px solid ${color}66` : "1px solid #e5e7eb" }}>
                         <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: selected ? `${color}18` : "#f3f4f6", color: selected ? color : "#9ca3af" }}>
-                          {PAY_ICON[method.type] ?? <CreditCard size={14}/>}
+                          <Banknote size={14}/>
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-black truncate" style={{ color: selected ? color : "#111827" }}>{method.name}</p>
-                          {method.provider && <p className="text-[10px] truncate" style={{ color: "#9ca3af" }}>{method.provider}</p>}
                         </div>
                         {selected && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />}
                       </button>
@@ -1111,8 +1474,127 @@ function POSInner() {
                   })}
                 </div>
               </div>
-            ))}
+            )}
 
+            {/* ── Cash change calculator ────────────────────────────────────── */}
+            {isCash && cart.length > 0 && (
+              <div className="rounded-2xl p-3 space-y-2.5" style={{ background: "rgba(22,163,74,0.04)", border: "1.5px solid rgba(22,163,74,0.18)" }}>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#16a34a" }}>Cash Calculator</p>
+
+                {/* Quick suggestion buttons */}
+                {cashSuggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {cashSuggestions.map(amt => (
+                      <button key={amt} onClick={() => setCashTendered(String(amt))}
+                        className="text-[10px] font-bold px-2.5 py-1.5 rounded-xl transition-all"
+                        style={{
+                          background: cashTenderedNum === amt ? "#16a34a" : "rgba(22,163,74,0.10)",
+                          color:      cashTenderedNum === amt ? "white"    : "#16a34a",
+                          border:     `1px solid ${cashTenderedNum === amt ? "#16a34a" : "rgba(22,163,74,0.25)"}`,
+                        }}>
+                        {money(amt)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Custom amount input */}
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold" style={{ color: "#16a34a" }}>Rp</span>
+                  <input
+                    type="number" min="0" step="1000"
+                    value={cashTendered}
+                    onChange={e => setCashTendered(e.target.value)}
+                    placeholder={money(total).replace("Rp\u00a0", "").replace("Rp ", "")}
+                    className="w-full rounded-xl pl-9 pr-3 py-2.5 text-sm font-mono font-bold focus:outline-none"
+                    style={{ background: "white", border: "1px solid rgba(22,163,74,0.3)", color: "#111827" }}
+                  />
+                </div>
+
+                {/* Change display */}
+                {cashTenderedNum > 0 && (
+                  <div className="flex items-center justify-between px-3 py-2 rounded-xl"
+                    style={{
+                      background: cashTenderedNum >= total ? "rgba(3,105,161,0.06)" : "rgba(220,38,38,0.06)",
+                      border:     `1px solid ${cashTenderedNum >= total ? "rgba(3,105,161,0.20)" : "rgba(220,38,38,0.20)"}`,
+                    }}>
+                    <span className="text-xs font-bold" style={{ color: cashTenderedNum >= total ? "#0369a1" : "#dc2626" }}>
+                      {cashTenderedNum >= total ? "Change" : "Short"}
+                    </span>
+                    <span className="text-base font-black font-mono" style={{ color: cashTenderedNum >= total ? "#0369a1" : "#dc2626" }}>
+                      {cashTenderedNum >= total ? money(changeNum) : `−${money(total - cashTenderedNum)}`}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── EDC (grouped by machine) ──────────────────────────────────── */}
+            {edcGroups.length > 0 && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black" style={{ color: "#9ca3af" }}>EDC</p>
+                <div className="space-y-1.5">
+                  {edcGroups.map(group => {
+                    const groupKey      = group.machineId != null ? String(group.machineId) : "unassigned";
+                    const isExpanded    = expandedEdcGroups.has(groupKey);
+                    const groupSelected = group.methods.some(m => m.id === payMethod?.id);
+
+                    return (
+                      <div key={groupKey} className="rounded-xl overflow-hidden" style={{ border: groupSelected ? "1.5px solid rgba(3,105,161,0.40)" : "1px solid #e5e7eb" }}>
+                        {/* Machine header — tap to expand/collapse */}
+                        <button
+                          onClick={() => setExpandedEdcGroups(prev => {
+                            const next = new Set(prev);
+                            next.has(groupKey) ? next.delete(groupKey) : next.add(groupKey);
+                            return next;
+                          })}
+                          className="w-full flex items-center gap-2 px-2.5 py-2"
+                          style={{ background: groupSelected ? "rgba(3,105,161,0.06)" : "#f9fafb" }}>
+                          <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: "rgba(3,105,161,0.10)", color: "#0369a1" }}>
+                            <Building2 size={11}/>
+                          </div>
+                          <span className="flex-1 text-left text-xs font-black truncate" style={{ color: groupSelected ? "#0369a1" : "#374151" }}>
+                            {group.machineLabel}
+                          </span>
+                          <span className="text-[10px]" style={{ color: "#9ca3af" }}>{group.methods.length}</span>
+                          <ChevronDown size={12} style={{ color: "#9ca3af", transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform .15s" }}/>
+                        </button>
+
+                        {/* Sub-methods */}
+                        {isExpanded && (
+                          <div className="divide-y" style={{ borderTop: "1px solid #f3f4f6" }}>
+                            {group.methods.map(method => {
+                              const selected = payMethod?.id === method.id;
+                              const edcType  = method.edcMethod ?? method.type;
+                              const color    = PAY_COLOR[edcType] ?? PAY_COLOR.edc;
+                              return (
+                                <button key={method.id}
+                                  onClick={() => { setPayMethod(method); setReference(""); }}
+                                  className="w-full flex items-center gap-2 pl-8 pr-2.5 py-2 text-left transition-all"
+                                  style={{ background: selected ? `${color}0D` : "white" }}>
+                                  <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: selected ? `${color}18` : "#f3f4f6", color: selected ? color : "#9ca3af" }}>
+                                    <CreditCard size={11}/>
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-black truncate" style={{ color: selected ? color : "#111827" }}>{method.name}</p>
+                                    {method.edcMethod && (
+                                      <p className="text-[10px] capitalize" style={{ color: "#9ca3af" }}>{method.edcMethod}</p>
+                                    )}
+                                  </div>
+                                  {selected && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Reference input for non-cash */}
             {needsReference && (
               <div>
                 <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Reference</label>
@@ -1139,6 +1621,7 @@ function POSInner() {
             </div>
           </div>
 
+          {/* Confirm button */}
           <div className="flex-shrink-0 px-3 py-3 space-y-2" style={{ background: "white", borderTop: "1px solid #e5e7eb" }}>
             <div className="flex items-end justify-between gap-2">
               <div>
@@ -1147,10 +1630,23 @@ function POSInner() {
               </div>
               <p className="text-[10px] text-right" style={{ color: "#9ca3af" }}>{itemCount} item{itemCount === 1 ? "" : "s"}</p>
             </div>
-            <button onClick={confirmPayment} disabled={!payMethod || processing || cart.length === 0}
+
+            {/* Cash shortfall warning */}
+            {isCash && cashTenderedNum > 0 && cashTenderedNum < total && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold" style={{ background: "rgba(220,38,38,0.06)", color: "#dc2626", border: "1px solid rgba(220,38,38,0.20)" }}>
+                <AlertCircle size={12}/> Cash is {money(total - cashTenderedNum)} short
+              </div>
+            )}
+
+            <button onClick={confirmPayment} disabled={!canConfirm || processing}
               className="w-full rounded-xl py-3 text-xs font-black transition-all disabled:opacity-30"
-              style={{ background: payMethod && cart.length > 0 ? "var(--brand-orange)" : "#f3f4f6", color: payMethod && cart.length > 0 ? "white" : "#9ca3af" }}>
-              {processing ? "Saving..." : cart.length === 0 ? "Add items first" : payMethod ? "Confirm Payment" : "Choose Method"}
+              style={{ background: canConfirm ? "var(--brand-orange)" : "#f3f4f6", color: canConfirm ? "white" : "#9ca3af" }}>
+              {processing ? "Saving..."
+                : cart.length === 0 ? "Add items first"
+                : !payMethod ? "Choose Method"
+                : isCash && cashTenderedNum === 0 ? "Enter Cash Amount"
+                : isCash && cashTenderedNum < total ? "Insufficient Cash"
+                : "Confirm Payment"}
             </button>
           </div>
         </main>

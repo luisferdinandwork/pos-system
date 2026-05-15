@@ -37,6 +37,11 @@ export type LocalTransactionPayload = {
   finalAmount: number;
   paymentMethod: string;
   paymentReference?: string | null;
+  // Cash payment fields
+  cashTendered?: number | null;
+  changeAmount?: number | null;
+  // Cashier session (optional)
+  cashierSessionId?: number | null;
   createdAt?: string;
 };
 
@@ -134,6 +139,10 @@ export async function prepareEventOffline(eventId: number) {
             id: method.id,
             name: method.name,
             type: method.type,
+            // ── NEW: persist EDC sub-type fields ──────────────────────────
+            edcMethod: (method as any).edcMethod ?? null,
+            edcMachineId: (method as any).edcMachineId ?? null,
+            // ─────────────────────────────────────────────────────────────
             provider: method.provider,
             accountInfo: method.accountInfo,
             isActive: method.isActive ? 1 : 0,
@@ -199,8 +208,8 @@ export async function getLocalEventBundle(eventId: number) {
 }
 
 /**
- * Saves a POS sale into local SQLite.
- * This should be the main checkout function during event.
+ * Saves a POS sale into local SQLite (offline-capable).
+ * Now supports cash tendered / change and cashier session tracking.
  */
 export async function createLocalTransaction(payload: LocalTransactionPayload) {
   if (!payload.clientTxnId) {
@@ -223,6 +232,7 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
       return existing;
     }
 
+    // Deduct stock for each item
     for (const item of payload.items) {
       const localItem = tx
         .select()
@@ -244,25 +254,27 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
       const nextStock = currentStock - Number(item.quantity);
 
       tx.update(localEventItems)
-        .set({
-          stock: nextStock,
-        })
+        .set({ stock: nextStock })
         .where(eq(localEventItems.id, item.eventItemId))
         .run();
     }
 
+    // Insert transaction row — include cash fields + cashier session
     const txn = tx
       .insert(localTransactions)
       .values({
-        clientTxnId: payload.clientTxnId,
-        eventId: payload.eventId,
-        totalAmount: String(payload.totalAmount),
-        discount: String(payload.discount),
-        finalAmount: String(payload.finalAmount),
-        paymentMethod: payload.paymentMethod,
+        clientTxnId:      payload.clientTxnId,
+        eventId:          payload.eventId,
+        cashierSessionId: payload.cashierSessionId ?? null,
+        totalAmount:      String(payload.totalAmount),
+        discount:         String(payload.discount),
+        finalAmount:      String(payload.finalAmount),
+        paymentMethod:    payload.paymentMethod,
         paymentReference: payload.paymentReference ?? null,
-        createdAt: payload.createdAt ?? nowIso(),
-        syncStatus: "pending",
+        cashTendered:     payload.cashTendered != null ? String(payload.cashTendered) : null,
+        changeAmount:     payload.changeAmount  != null ? String(payload.changeAmount)  : null,
+        createdAt:        payload.createdAt ?? nowIso(),
+        syncStatus:       "pending",
       })
       .returning()
       .get();
@@ -344,23 +356,26 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
   for (const txn of pending) {
     try {
       const created = await createTransaction({
-        clientTxnId: txn.clientTxnId,
+        clientTxnId:      txn.clientTxnId,
         eventId,
-        totalAmount: toNumber(txn.totalAmount),
-        discount: toNumber(txn.discount),
-        finalAmount: toNumber(txn.finalAmount),
-        paymentMethod: txn.paymentMethod,
+        cashierSessionId: txn.cashierSessionId ?? null,
+        totalAmount:      toNumber(txn.totalAmount),
+        discount:         toNumber(txn.discount),
+        finalAmount:      toNumber(txn.finalAmount),
+        paymentMethod:    txn.paymentMethod,
         paymentReference: txn.paymentReference,
-        createdAt: txn.createdAt,
+        cashTendered:     txn.cashTendered != null ? toNumber(txn.cashTendered) : null,
+        changeAmount:     txn.changeAmount  != null ? toNumber(txn.changeAmount)  : null,
+        createdAt:        txn.createdAt,
         items: txn.items.map((item) => ({
-          eventItemId: item.eventItemId,
-          itemId: item.itemId,
-          productName: item.productName,
-          quantity: item.quantity,
-          unitPrice: toNumber(item.unitPrice),
-          discountAmt: toNumber(item.discountAmt),
-          finalPrice: toNumber(item.finalPrice),
-          subtotal: toNumber(item.subtotal),
+          eventItemId:  item.eventItemId,
+          itemId:       item.itemId,
+          productName:  item.productName,
+          quantity:     item.quantity,
+          unitPrice:    toNumber(item.unitPrice),
+          discountAmt:  toNumber(item.discountAmt),
+          finalPrice:   toNumber(item.finalPrice),
+          subtotal:     toNumber(item.subtotal),
           promoApplied: item.promoApplied,
         })),
       });
@@ -457,38 +472,16 @@ export async function getLocalEventStats(eventId: number) {
   );
 
   const txnCount = txns.length;
-  const revenue = txns.reduce(
-    (sum, txn) => sum + Number(txn.finalAmount ?? 0),
-    0
-  );
-  const discount = txns.reduce(
-    (sum, txn) => sum + Number(txn.discount ?? 0),
-    0
-  );
-  const itemsSold = items.reduce(
-    (sum, item) => sum + Number(item.quantity ?? 0),
-    0
-  );
+  const revenue = txns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0);
+  const discount = txns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0);
+  const itemsSold = items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
 
-  const todayTxnCount = todayTxns.length;
-  const todayRevenue = todayTxns.reduce(
-    (sum, txn) => sum + Number(txn.finalAmount ?? 0),
-    0
-  );
-  const todayDiscount = todayTxns.reduce(
-    (sum, txn) => sum + Number(txn.discount ?? 0),
-    0
-  );
-  const todayItemsSold = todayItems.reduce(
-    (sum, item) => sum + Number(item.quantity ?? 0),
-    0
-  );
+  const todayTxnCount  = todayTxns.length;
+  const todayRevenue   = todayTxns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0);
+  const todayDiscount  = todayTxns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0);
+  const todayItemsSold = todayItems.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
 
-  const totalUnits = stockItems.reduce(
-    (sum, item) => sum + Number(item.stock ?? 0),
-    0
-  );
-
+  const totalUnits = stockItems.reduce((sum, item) => sum + Number(item.stock ?? 0), 0);
   const totalItems = stockItems.length;
 
   return {
@@ -496,12 +489,10 @@ export async function getLocalEventStats(eventId: number) {
     revenue,
     discount,
     itemsSold,
-
     todayTxnCount,
     todayRevenue,
     todayDiscount,
     todayItemsSold,
-
     totalUnits,
     totalItems,
   };
@@ -522,17 +513,11 @@ export async function getLocalPOSState() {
   const event = getLatestPreparedLocalEvent();
 
   if (!event) {
-    return {
-      hasPreparedEvent: false,
-      event: null,
-      pendingSyncCount: 0,
-    };
+    return { hasPreparedEvent: false, event: null, pendingSyncCount: 0 };
   }
 
   const [pendingRow] = localDb
-    .select({
-      count: sql<number>`count(${localTransactions.clientTxnId})`,
-    })
+    .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
     .from(localTransactions)
     .where(
       and(
@@ -562,9 +547,7 @@ export async function getLocalPreparedEventsState() {
 
   const eventsWithPending = preparedEvents.map((event) => {
     const pendingRow = localDb
-      .select({
-        count: sql<number>`count(${localTransactions.clientTxnId})`,
-      })
+      .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
       .from(localTransactions)
       .where(
         and(
@@ -580,16 +563,12 @@ export async function getLocalPreparedEventsState() {
     };
   });
 
-  return {
-    events: eventsWithPending,
-  };
+  return { events: eventsWithPending };
 }
 
 export function getLocalPendingSyncCount(eventId: number) {
   const row = localDb
-    .select({
-      count: sql<number>`count(${localTransactions.clientTxnId})`,
-    })
+    .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
     .from(localTransactions)
     .where(
       and(
@@ -604,9 +583,7 @@ export function getLocalPendingSyncCount(eventId: number) {
 
 export function deleteLocalEventData(
   eventId: number,
-  options?: {
-    force?: boolean;
-  }
+  options?: { force?: boolean }
 ) {
   const force = options?.force ?? false;
   const pendingCount = getLocalPendingSyncCount(eventId);
@@ -620,9 +597,7 @@ export function deleteLocalEventData(
   }
 
   const txns = localDb
-    .select({
-      clientTxnId: localTransactions.clientTxnId,
-    })
+    .select({ clientTxnId: localTransactions.clientTxnId })
     .from(localTransactions)
     .where(eq(localTransactions.eventId, eventId))
     .all();
@@ -635,26 +610,11 @@ export function deleteLocalEventData(
         .where(inArray(localTransactionItems.clientTxnId, clientTxnIds))
         .run();
     }
-
-    tx.delete(localTransactions)
-      .where(eq(localTransactions.eventId, eventId))
-      .run();
-
-    tx.delete(localPromos)
-      .where(eq(localPromos.eventId, eventId))
-      .run();
-
-    tx.delete(localEventItems)
-      .where(eq(localEventItems.eventId, eventId))
-      .run();
-
-    tx.delete(localSyncLogs)
-      .where(eq(localSyncLogs.eventId, eventId))
-      .run();
-
-    tx.delete(localEvents)
-      .where(eq(localEvents.id, eventId))
-      .run();
+    tx.delete(localTransactions).where(eq(localTransactions.eventId, eventId)).run();
+    tx.delete(localPromos).where(eq(localPromos.eventId, eventId)).run();
+    tx.delete(localEventItems).where(eq(localEventItems.eventId, eventId)).run();
+    tx.delete(localSyncLogs).where(eq(localSyncLogs.eventId, eventId)).run();
+    tx.delete(localEvents).where(eq(localEvents.id, eventId)).run();
   });
 
   return {

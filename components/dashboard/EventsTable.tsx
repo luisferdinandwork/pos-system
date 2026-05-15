@@ -33,7 +33,7 @@ export function EventsTable({ events }: Props) {
                 "Status",
                 "Revenue",
                 "Transactions",
-                "Sell Ratio",
+                "Sales Percentage",
                 "Remaining",
                 "",
               ].map((h) => (

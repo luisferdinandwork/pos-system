@@ -1,7 +1,7 @@
 // app/(main)/events/page.tsx
 "use client";
 import { useEffect, useState } from "react";
-import { Plus, Pencil, Trash2, X, Calendar, MapPin, ArrowRight } from "lucide-react";
+import { Plus, Pencil, Trash2, X, Calendar, MapPin, ArrowRight, Copy, RefreshCw } from "lucide-react";
 import Link from "next/link";
 
 const STATUS_META = {
@@ -23,10 +23,11 @@ const empty = (): Form => ({
 });
 
 export default function EventsPage() {
-  const [events, setEvents]   = useState<Event[]>([]);
-  const [form, setForm]       = useState<Form>(empty());
-  const [showForm, setShowForm] = useState(false);
-  const [saving, setSaving]   = useState(false);
+  const [events,      setEvents]      = useState<Event[]>([]);
+  const [form,        setForm]        = useState<Form>(empty());
+  const [showForm,    setShowForm]    = useState(false);
+  const [saving,      setSaving]      = useState(false);
+  const [duplicating, setDuplicating] = useState<number | null>(null);
 
   async function load() {
     const r = await fetch("/api/events");
@@ -44,52 +45,54 @@ export default function EventsPage() {
     setSaving(false); setShowForm(false); setForm(empty()); load();
   }
 
+  async function handleDuplicate(ev: Event) {
+    setDuplicating(ev.id);
+    try {
+      const res    = await fetch(`/api/events/${ev.id}/duplicate`, { method: "POST" });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Failed to duplicate event");
+      await load();
+      // Open the new event's edit form so the operator can rename + set dates
+      setForm({
+        id:          result.event.id,
+        name:        result.event.name,
+        location:    result.event.location    ?? "",
+        description: result.event.description ?? "",
+        status:      result.event.status,
+        startDate:   "",
+        endDate:     "",
+      });
+      setShowForm(true);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to duplicate event");
+    } finally {
+      setDuplicating(null);
+    }
+  }
+
   async function deleteEventWithLocalCleanup(id: number) {
     const ok = confirm(
       "Delete this event? This will also remove its local POS data on this computer."
     );
-
     if (!ok) return;
 
-    const res = await fetch(`/api/events?id=${id}`, {
-      method: "DELETE",
-    });
-
+    const res    = await fetch(`/api/events?id=${id}`, { method: "DELETE" });
     const result = await res.json();
 
     if (!res.ok) {
-      if (
-        res.status === 409 &&
-        result.code === "LOCAL_POS_HAS_UNSYNCED_SALES"
-      ) {
+      if (res.status === 409 && result.code === "LOCAL_POS_HAS_UNSYNCED_SALES") {
         const force = confirm(
           `${result.error}\n\nForce delete anyway? Unsynced local POS sales will be lost.`
         );
-
         if (!force) return;
 
-        const forceRes = await fetch(
-          `/api/events?id=${id}&forceLocalDelete=true`,
-          {
-            method: "DELETE",
-          }
-        );
-
+        const forceRes    = await fetch(`/api/events?id=${id}&forceLocalDelete=true`, { method: "DELETE" });
         const forceResult = await forceRes.json();
-
-        if (!forceRes.ok) {
-          alert(forceResult.error || "Failed to delete event");
-          return;
-        }
-
-        await load();
-        return;
+        if (!forceRes.ok) { alert(forceResult.error || "Failed to delete event"); return; }
+        await load(); return;
       }
-
-      alert(result.error || "Failed to delete event");
-      return;
+      alert(result.error || "Failed to delete event"); return;
     }
-
     await load();
   }
 
@@ -212,7 +215,8 @@ export default function EventsPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {events.map((ev) => {
-            const meta = STATUS_META[ev.status as keyof typeof STATUS_META] ?? STATUS_META.draft;
+            const meta         = STATUS_META[ev.status as keyof typeof STATUS_META] ?? STATUS_META.draft;
+            const isDuplicating = duplicating === ev.id;
             return (
               <div key={ev.id} className="rounded-2xl border overflow-hidden transition-all hover:shadow-md" style={cs}>
                 <div className="px-5 py-4">
@@ -247,41 +251,44 @@ export default function EventsPage() {
                     </p>
                   )}
                 </div>
-                <div
-                  className="flex items-center justify-between px-5 py-3"
-                  style={{ borderTop: "1px solid var(--border)" }}
-                >
-                  <div className="flex items-center gap-2">
+
+                <div className="flex items-center justify-between px-5 py-3"
+                  style={{ borderTop: "1px solid var(--border)" }}>
+                  <div className="flex items-center gap-1.5">
+                    {/* Edit */}
                     <button
                       onClick={() => {
                         setForm({
-                          id: ev.id,
-                          name: ev.name,
-                          location: ev.location ?? "",
-                          description: ev.description ?? "",
-                          status: ev.status,
-                          startDate: ev.startDate ?? "",
-                          endDate: ev.endDate ?? "",
+                          id: ev.id, name: ev.name,
+                          location: ev.location ?? "", description: ev.description ?? "",
+                          status: ev.status, startDate: ev.startDate ?? "", endDate: ev.endDate ?? "",
                         });
                         setShowForm(true);
                       }}
                       className="p-2 rounded-lg"
-                      style={{
-                        background: "rgba(255,200,92,0.15)",
-                        color: "#b45309",
-                      }}
-                    >
+                      title="Edit event"
+                      style={{ background: "rgba(255,200,92,0.15)", color: "#b45309" }}>
                       <Pencil size={14} />
                     </button>
 
+                    {/* Duplicate */}
+                    <button
+                      onClick={() => handleDuplicate(ev)}
+                      disabled={isDuplicating}
+                      className="p-2 rounded-lg disabled:opacity-50 transition-all"
+                      title="Duplicate event (copies all items, resets stock to 0)"
+                      style={{ background: "rgba(3,105,161,0.1)", color: "#0369a1" }}>
+                      {isDuplicating
+                        ? <RefreshCw size={14} className="animate-spin" />
+                        : <Copy size={14} />}
+                    </button>
+
+                    {/* Delete */}
                     <button
                       onClick={() => deleteEventWithLocalCleanup(ev.id)}
                       className="p-2 rounded-lg"
-                      style={{
-                        background: "rgba(220,38,38,0.1)",
-                        color: "#dc2626",
-                      }}
-                    >
+                      title="Delete event"
+                      style={{ background: "rgba(220,38,38,0.1)", color: "#dc2626" }}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -289,11 +296,7 @@ export default function EventsPage() {
                   <Link
                     href={`/events/${ev.id}`}
                     className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-                    style={{
-                      background: "var(--brand-orange)",
-                      color: "white",
-                    }}
-                  >
+                    style={{ background: "var(--brand-orange)", color: "white" }}>
                     Manage <ArrowRight size={13} />
                   </Link>
                 </div>

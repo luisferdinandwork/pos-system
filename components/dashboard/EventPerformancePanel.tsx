@@ -46,7 +46,7 @@ export function EventPerformancePanel({ ev }: Props) {
 
       <div className="space-y-3">
         <MetricBar
-          label="Sell-through"
+          label="Sale"
           value={`${sellPct}%`}
           helper={`${ev.itemsSold.toLocaleString("id-ID")} sold of ${ev.originalUnits.toLocaleString("id-ID")} total`}
           percent={sellPct}
@@ -54,7 +54,7 @@ export function EventPerformancePanel({ ev }: Props) {
         />
 
         <MetricBar
-          label="Revenue realization"
+          label="Revenue"
           value={`${revenuePct}%`}
           helper={`${formatRupiah(ev.revenue)} of ${formatRupiah(ev.totalStockValue)}`}
           percent={revenuePct}
