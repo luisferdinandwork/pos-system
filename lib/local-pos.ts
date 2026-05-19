@@ -6,6 +6,8 @@ import {
   localEventItems,
   localPaymentMethods,
   localPromos,
+  localCashierSessions,
+  localCashDrawerCounts,
   localTransactions,
   localTransactionItems,
   localSyncLogs,
@@ -14,7 +16,16 @@ import {
 import { getAllEvents, getEventItems } from "@/lib/events";
 import { getPromosByEvent } from "@/lib/promos";
 import { getActivePaymentMethods } from "@/lib/payment-methods";
-import { createTransaction } from "@/lib/transactions";
+import { createTransaction, setReceiptPrintCountAtLeast } from "@/lib/transactions";
+import {
+  formatEventTransactionDisplayId,
+  getTransactionMonthPrefix,
+  parseEventTransactionSequence,
+} from "@/lib/transaction-ids";
+import { db } from "@/lib/db";
+import { cashierSessions, cashDrawerCounts } from "@/lib/db/schema";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export type LocalCartItemPayload = {
   eventItemId: number;
@@ -30,6 +41,7 @@ export type LocalCartItemPayload = {
 
 export type LocalTransactionPayload = {
   clientTxnId: string;
+  displayId?: string | null;
   eventId: number;
   items: LocalCartItemPayload[];
   totalAmount: number;
@@ -37,11 +49,11 @@ export type LocalTransactionPayload = {
   finalAmount: number;
   paymentMethod: string;
   paymentReference?: string | null;
-  // Cash payment fields
   cashTendered?: number | null;
   changeAmount?: number | null;
-  // Cashier session (optional)
   cashierSessionId?: number | null;
+  // Cashier name stamped at sale time — survives even before session sync
+  cashierName?: string | null;
   createdAt?: string;
 };
 
@@ -49,30 +61,65 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-export function makeLocalClientTxnId(eventId: number) {
-  return `LOCAL-EV${eventId}-${Date.now()}-${Math.random()
-    .toString(16)
-    .slice(2)}`;
-}
-
 function toNumber(value: unknown) {
   const num = Number(value ?? 0);
   return Number.isFinite(num) ? num : 0;
 }
 
-/**
- * Copies one event from Neon into local SQLite.
- * This is what you run before the event starts.
- */
+export function makeLocalClientTxnId(eventCodeOrId: string | number) {
+  return `LOCAL-EV${eventCodeOrId}-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
+}
+
+export function getLocalEventCode(eventId: number) {
+  const event = localDb
+    .select({ code: localEvents.code })
+    .from(localEvents)
+    .where(eq(localEvents.id, eventId))
+    .limit(1)
+    .get();
+
+  if (!event?.code || !/^\d{4}$/.test(event.code)) {
+    throw new Error(
+      "Local event is missing the 4-digit event code. Prepare the event offline again."
+    );
+  }
+
+  return event.code;
+}
+
+export function generateLocalDisplayId(eventId: number, date = new Date()) {
+  const eventCode = getLocalEventCode(eventId);
+  const prefix = getTransactionMonthPrefix(eventCode, date);
+
+  const rows = localDb
+    .select({ displayId: localTransactions.displayId })
+    .from(localTransactions)
+    .where(eq(localTransactions.eventId, eventId))
+    .all();
+
+  const lastSeq = rows
+    .map((row) => String(row.displayId ?? ""))
+    .filter((displayId) => displayId.startsWith(prefix))
+    .reduce((max, displayId) => Math.max(max, parseEventTransactionSequence(displayId)), 0);
+
+  return formatEventTransactionDisplayId(eventCode, date, lastSeq + 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prepare local event data
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function prepareEventOffline(eventId: number) {
-  const [events, items, promos, paymentMethods] = await Promise.all([
+  const [allEvents, items, promos, paymentMethods] = await Promise.all([
     getAllEvents(),
     getEventItems(eventId),
     getPromosByEvent(eventId),
     getActivePaymentMethods(),
   ]);
 
-  const event = events.find((row) => row.id === eventId);
+  const event = allEvents.find((row) => row.id === eventId);
 
   if (!event) {
     throw new Error("Event not found.");
@@ -86,6 +133,8 @@ export async function prepareEventOffline(eventId: number) {
     tx.insert(localEvents)
       .values({
         id: event.id,
+        code: event.code,
+        verifierCode: event.verifierCode,
         name: event.name,
         status: event.status,
         location: event.location,
@@ -139,10 +188,8 @@ export async function prepareEventOffline(eventId: number) {
             id: method.id,
             name: method.name,
             type: method.type,
-            // ── NEW: persist EDC sub-type fields ──────────────────────────
             edcMethod: (method as any).edcMethod ?? null,
             edcMachineId: (method as any).edcMachineId ?? null,
-            // ─────────────────────────────────────────────────────────────
             provider: method.provider,
             accountInfo: method.accountInfo,
             isActive: method.isActive ? 1 : 0,
@@ -164,9 +211,10 @@ export async function prepareEventOffline(eventId: number) {
   return getLocalEventBundle(eventId);
 }
 
-/**
- * Reads event data from local SQLite.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Read local event data
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function getLocalEventBundle(eventId: number) {
   const event = localDb
     .select()
@@ -207,16 +255,16 @@ export async function getLocalEventBundle(eventId: number) {
   };
 }
 
-/**
- * Saves a POS sale into local SQLite (offline-capable).
- * Now supports cash tendered / change and cashier session tracking.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Create local transaction
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function createLocalTransaction(payload: LocalTransactionPayload) {
   if (!payload.clientTxnId) {
     throw new Error("clientTxnId is required.");
   }
 
-  if (!payload.items.length) {
+  if (!payload.items || payload.items.length === 0) {
     throw new Error("Transaction must have at least one item.");
   }
 
@@ -232,7 +280,6 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
       return existing;
     }
 
-    // Deduct stock for each item
     for (const item of payload.items) {
       const localItem = tx
         .select()
@@ -259,22 +306,32 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
         .run();
     }
 
-    // Insert transaction row — include cash fields + cashier session
+    const eventCode = getLocalEventCode(payload.eventId);
+    const createdAt = payload.createdAt ?? nowIso();
+
     const txn = tx
       .insert(localTransactions)
       .values({
-        clientTxnId:      payload.clientTxnId,
-        eventId:          payload.eventId,
+        clientTxnId: payload.clientTxnId,
+        displayId:
+          payload.displayId ??
+          generateLocalDisplayId(payload.eventId, new Date(createdAt)),
+        eventId: payload.eventId,
+        eventCode,
         cashierSessionId: payload.cashierSessionId ?? null,
-        totalAmount:      String(payload.totalAmount),
-        discount:         String(payload.discount),
-        finalAmount:      String(payload.finalAmount),
-        paymentMethod:    payload.paymentMethod,
+        cashierName: payload.cashierName ?? null,
+        totalAmount: String(payload.totalAmount),
+        discount: String(payload.discount),
+        finalAmount: String(payload.finalAmount),
+        paymentMethod: payload.paymentMethod,
         paymentReference: payload.paymentReference ?? null,
-        cashTendered:     payload.cashTendered != null ? String(payload.cashTendered) : null,
-        changeAmount:     payload.changeAmount  != null ? String(payload.changeAmount)  : null,
-        createdAt:        payload.createdAt ?? nowIso(),
-        syncStatus:       "pending",
+        cashTendered:
+          payload.cashTendered != null ? String(payload.cashTendered) : null,
+        changeAmount:
+          payload.changeAmount != null ? String(payload.changeAmount) : null,
+        createdAt,
+        syncStatus: "pending",
+        receiptPrintCount: 0,
       })
       .returning()
       .get();
@@ -286,14 +343,22 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
           eventItemId: item.eventItemId,
           itemId: item.itemId,
           productName: item.productName,
-          quantity: item.quantity,
+          quantity: Number(item.quantity),
           unitPrice: String(item.unitPrice),
           discountAmt: String(item.discountAmt),
           finalPrice: String(item.finalPrice),
           subtotal: String(item.subtotal),
-          promoApplied: item.promoApplied,
+          promoApplied: item.promoApplied ?? null,
         }))
       )
+      .run();
+
+    tx.insert(localSyncLogs)
+      .values({
+        eventId: payload.eventId,
+        message: `Saved local transaction ${payload.clientTxnId}`,
+        createdAt: nowIso(),
+      })
       .run();
 
     return txn;
@@ -302,12 +367,144 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
   return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cashier session helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the most recent open (unclosed) local cashier session for an event,
+ * or null if none exists.
+ */
+export function getActiveLocalCashierSession(eventId: number) {
+  return (
+    localDb
+      .select()
+      .from(localCashierSessions)
+      .where(
+        and(
+          eq(localCashierSessions.eventId, eventId),
+          sql`${localCashierSessions.closedAt} IS NULL`
+        )
+      )
+      .orderBy(sql`${localCashierSessions.openedAt} desc`)
+      .limit(1)
+      .get() ?? null
+  );
+}
+
+/**
+ * Opens a new local cashier session. Returns the created row.
+ */
+export function openLocalCashierSession(
+  eventId: number,
+  cashierName: string,
+  openingCash = 0
+) {
+  return localDb
+    .insert(localCashierSessions)
+    .values({
+      eventId,
+      cashierName,
+      openingCash: String(openingCash),
+      openedAt: nowIso(),
+      syncStatus: "pending",
+    })
+    .returning()
+    .get();
+}
+
+/**
+ * Closes a local cashier session by id.
+ */
+export function closeLocalCashierSession(
+  sessionId: number,
+  closingCash?: number,
+  notes?: string
+) {
+  return localDb
+    .update(localCashierSessions)
+    .set({
+      closedAt: nowIso(),
+      closingCash: closingCash != null ? String(closingCash) : null,
+      notes: notes ?? null,
+    })
+    .where(eq(localCashierSessions.id, sessionId))
+    .returning()
+    .get();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cash drawer count helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function createLocalCashDrawerCount(params: {
+  eventId: number;
+  cashierSessionId?: number | null;
+  countedBy?: string | null;
+  expectedCash: number;
+  actualCash: number;
+  reason?: string;
+  notes?: string | null;
+}) {
+  const diff = params.actualCash - params.expectedCash;
+
+  return localDb
+    .insert(localCashDrawerCounts)
+    .values({
+      eventId:          params.eventId,
+      cashierSessionId: params.cashierSessionId ?? null,
+      countedBy:        params.countedBy ?? null,
+      expectedCash:     String(params.expectedCash),
+      actualCash:       String(params.actualCash),
+      difference:       String(diff),
+      reason:           params.reason ?? "count",
+      notes:            params.notes ?? null,
+      countedAt:        nowIso(),
+      syncStatus:       "pending",
+    })
+    .returning()
+    .get();
+}
+
+export function getLocalCashDrawerCounts(eventId: number) {
+  return localDb
+    .select()
+    .from(localCashDrawerCounts)
+    .where(eq(localCashDrawerCounts.eventId, eventId))
+    .orderBy(sql`${localCashDrawerCounts.countedAt} desc`)
+    .all();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local transaction reads
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function getLocalTransactionsByEvent(eventId: number) {
   return localDb
     .select()
     .from(localTransactions)
     .where(eq(localTransactions.eventId, eventId))
     .orderBy(sql`${localTransactions.createdAt} desc`)
+    .all();
+}
+
+export async function getLocalTransactionByClientTxnId(clientTxnId: string) {
+  const txn = localDb
+    .select()
+    .from(localTransactions)
+    .where(eq(localTransactions.clientTxnId, clientTxnId))
+    .limit(1)
+    .get();
+
+  return txn ?? null;
+}
+
+export async function getLocalTransactionItems(clientTxnId: string) {
+  return localDb
+    .select()
+    .from(localTransactionItems)
+    .where(eq(localTransactionItems.clientTxnId, clientTxnId))
+    .orderBy(localTransactionItems.id)
     .all();
 }
 
@@ -340,60 +537,364 @@ export async function getUnsyncedLocalTransactions(eventId: number) {
   }));
 }
 
-/**
- * Sends unsynced local transactions to Neon.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Receipt print count helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function incrementLocalReceiptPrintCount(clientTxnId: string) {
+  const txn = await getLocalTransactionByClientTxnId(clientTxnId);
+
+  if (!txn) {
+    throw new Error(`Local transaction "${clientTxnId}" not found.`);
+  }
+
+  const nextCount = Number(txn.receiptPrintCount ?? 0) + 1;
+
+  localDb
+    .update(localTransactions)
+    .set({ receiptPrintCount: nextCount })
+    .where(eq(localTransactions.clientTxnId, clientTxnId))
+    .run();
+
+  let cloudSync:
+    | {
+        transactionId: number;
+        localPrintCount: number;
+        cloudBefore: number;
+        inserted: number;
+        cloudAfter: number;
+      }
+    | null = null;
+
+  if (txn.serverTransactionId) {
+    const updated = await setReceiptPrintCountAtLeast(
+      Number(txn.serverTransactionId),
+      nextCount
+    );
+
+    cloudSync = {
+      transactionId: updated.id,
+      localPrintCount: nextCount,
+      cloudBefore: Number(updated.receiptPrintCount ?? 0),
+      inserted: 0,
+      cloudAfter: Number(updated.receiptPrintCount ?? 0),
+    };
+  }
+
+  return {
+    clientTxnId,
+    serverTransactionId: txn.serverTransactionId ?? null,
+    receiptPrintCount: nextCount,
+    cloudSync,
+  };
+}
+
+export async function syncLocalReceiptPrintCountsToNeon(eventId: number) {
+  const txns = localDb
+    .select()
+    .from(localTransactions)
+    .where(eq(localTransactions.eventId, eventId))
+    .all();
+
+  const rowsToSync = txns.filter(
+    (txn) =>
+      txn.serverTransactionId != null &&
+      Number(txn.receiptPrintCount ?? 0) > 0
+  );
+
+  const results: {
+    clientTxnId: string;
+    serverTransactionId: number;
+    localPrintCount: number;
+    cloudBefore: number;
+    inserted: number;
+    cloudAfter: number;
+  }[] = [];
+
+  for (const txn of rowsToSync) {
+    const result = await setReceiptPrintCountAtLeast(
+      Number(txn.serverTransactionId),
+      Number(txn.receiptPrintCount ?? 0)
+    );
+
+    results.push({
+      clientTxnId: txn.clientTxnId,
+      serverTransactionId: Number(txn.serverTransactionId),
+      localPrintCount: Number(txn.receiptPrintCount ?? 0),
+      cloudBefore: Number(result.receiptPrintCount ?? 0),
+      inserted: 0,
+      cloudAfter: Number(result.receiptPrintCount ?? 0),
+    });
+  }
+
+  return {
+    eventId,
+    processed: results.length,
+    inserted: results.reduce((sum, row) => sum + row.inserted, 0),
+    results,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync cashier sessions to Neon
+// Must run BEFORE syncing transactions so serverSessionId FK can be resolved.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function syncLocalCashierSessionsToNeon(eventId: number) {
+  const pending = localDb
+    .select()
+    .from(localCashierSessions)
+    .where(
+      and(
+        eq(localCashierSessions.eventId, eventId),
+        eq(localCashierSessions.syncStatus, "pending")
+      )
+    )
+    .all();
+
+  const results: {
+    localId: number;
+    ok: boolean;
+    serverSessionId?: number;
+    error?: string;
+  }[] = [];
+
+  for (const session of pending) {
+    try {
+      const created = await db
+        .insert(cashierSessions)
+        .values({
+          eventId,
+          cashierName:  session.cashierName,
+          openingCash:  session.openingCash,
+          closingCash:  session.closingCash ?? undefined,
+          openedAt:     session.openedAt ? new Date(session.openedAt) : undefined,
+          closedAt:     session.closedAt ? new Date(session.closedAt) : undefined,
+          notes:        session.notes,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      localDb
+        .update(localCashierSessions)
+        .set({ syncStatus: "synced", serverSessionId: created.id })
+        .where(eq(localCashierSessions.id, session.id))
+        .run();
+
+      results.push({ localId: session.id, ok: true, serverSessionId: created.id });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to sync session.";
+
+      localDb
+        .update(localCashierSessions)
+        .set({ syncStatus: "failed" })
+        .where(eq(localCashierSessions.id, session.id))
+        .run();
+
+      results.push({ localId: session.id, ok: false, error: msg });
+    }
+  }
+
+  return {
+    synced: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync cash drawer counts to Neon
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function syncLocalCashDrawerCountsToNeon(eventId: number) {
+  const pending = localDb
+    .select()
+    .from(localCashDrawerCounts)
+    .where(
+      and(
+        eq(localCashDrawerCounts.eventId, eventId),
+        eq(localCashDrawerCounts.syncStatus, "pending")
+      )
+    )
+    .all();
+
+  const results: {
+    localId: number;
+    ok: boolean;
+    serverCountId?: number;
+    error?: string;
+  }[] = [];
+
+  for (const count of pending) {
+    try {
+      // Resolve server session id from the local session, if applicable
+      let serverSessionId: number | null = null;
+
+      if (count.cashierSessionId) {
+        const localSession = localDb
+          .select()
+          .from(localCashierSessions)
+          .where(eq(localCashierSessions.id, count.cashierSessionId))
+          .limit(1)
+          .get();
+
+        serverSessionId = localSession?.serverSessionId ?? null;
+      }
+
+      const created = await db
+        .insert(cashDrawerCounts)
+        .values({
+          eventId,
+          cashierSessionId: serverSessionId ?? undefined,
+          countedBy:    count.countedBy,
+          expectedCash: count.expectedCash,
+          actualCash:   count.actualCash,
+          difference:   count.difference,
+          reason:       count.reason,
+          notes:        count.notes,
+          countedAt:    count.countedAt ? new Date(count.countedAt) : undefined,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      localDb
+        .update(localCashDrawerCounts)
+        .set({ syncStatus: "synced", serverCountId: created.id, syncError: null })
+        .where(eq(localCashDrawerCounts.id, count.id))
+        .run();
+
+      results.push({ localId: count.id, ok: true, serverCountId: created.id });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to sync drawer count.";
+
+      localDb
+        .update(localCashDrawerCounts)
+        .set({ syncStatus: "failed", syncError: msg })
+        .where(eq(localCashDrawerCounts.id, count.id))
+        .run();
+
+      results.push({ localId: count.id, ok: false, error: msg });
+    }
+  }
+
+  return {
+    synced: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync local SQLite transactions to Neon
+// Order: sessions → transactions → drawer counts → receipt print counts
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function syncLocalTransactionsToNeon(eventId: number) {
+  // 1. Sync cashier sessions first so we have serverSessionId for transactions
+  const sessionSync = await syncLocalCashierSessionsToNeon(eventId);
+
+  // 2. Build a local-id → server-id map for resolved sessions
+  const sessionRows = localDb
+    .select()
+    .from(localCashierSessions)
+    .where(eq(localCashierSessions.eventId, eventId))
+    .all();
+
+  const sessionMap = new Map<number, number>();
+  for (const s of sessionRows) {
+    if (s.serverSessionId) sessionMap.set(s.id, s.serverSessionId);
+  }
+
+  // 3. Sync pending transactions
   const pending = await getUnsyncedLocalTransactions(eventId);
 
   const results: {
     clientTxnId: string;
     ok: boolean;
     transactionId?: number;
+    displayId?: string | null;
+    receiptPrintCount?: number;
+    receiptPrintsSynced?: number;
     error?: string;
   }[] = [];
 
   for (const txn of pending) {
     try {
+      if (!txn.items || txn.items.length === 0) {
+        throw new Error("Local transaction has no items.");
+      }
+
+      // Resolve server cashier session id (null for anonymous / unsynced sessions)
+      const serverCashierSessionId =
+        txn.cashierSessionId != null
+          ? (sessionMap.get(txn.cashierSessionId) ?? null)
+          : null;
+
       const created = await createTransaction({
         clientTxnId:      txn.clientTxnId,
+        displayId:        txn.displayId,
         eventId,
-        cashierSessionId: txn.cashierSessionId ?? null,
+        cashierSessionId: serverCashierSessionId,
+        cashierName:      (txn as any).cashierName ?? null,
         totalAmount:      toNumber(txn.totalAmount),
         discount:         toNumber(txn.discount),
         finalAmount:      toNumber(txn.finalAmount),
         paymentMethod:    txn.paymentMethod,
         paymentReference: txn.paymentReference,
-        cashTendered:     txn.cashTendered != null ? toNumber(txn.cashTendered) : null,
-        changeAmount:     txn.changeAmount  != null ? toNumber(txn.changeAmount)  : null,
-        createdAt:        txn.createdAt,
+        cashTendered:
+          txn.cashTendered != null ? toNumber(txn.cashTendered) : null,
+        changeAmount:
+          txn.changeAmount != null ? toNumber(txn.changeAmount) : null,
+        receiptPrintCount: Number(txn.receiptPrintCount ?? 0),
+        createdAt: txn.createdAt,
+
         items: txn.items.map((item) => ({
           eventItemId:  item.eventItemId,
           itemId:       item.itemId,
           productName:  item.productName,
-          quantity:     item.quantity,
+          quantity:     Number(item.quantity),
           unitPrice:    toNumber(item.unitPrice),
           discountAmt:  toNumber(item.discountAmt),
           finalPrice:   toNumber(item.finalPrice),
           subtotal:     toNumber(item.subtotal),
-          promoApplied: item.promoApplied,
+          promoApplied: item.promoApplied ?? null,
         })),
       });
 
       localDb
         .update(localTransactions)
         .set({
-          syncStatus: "synced",
+          syncStatus:          "synced",
           serverTransactionId: created.id,
-          syncError: null,
+          syncError:           null,
         })
         .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
         .run();
 
+      const receiptSync =
+        Number(txn.receiptPrintCount ?? 0) > 0
+          ? await setReceiptPrintCountAtLeast(
+              created.id,
+              Number(txn.receiptPrintCount ?? 0)
+            )
+          : null;
+
+      localDb
+        .insert(localSyncLogs)
+        .values({
+          eventId,
+          message: `Synced local transaction ${txn.clientTxnId} to cloud transaction #${created.id}`,
+          createdAt: nowIso(),
+        })
+        .run();
+
       results.push({
-        clientTxnId: txn.clientTxnId,
-        ok: true,
-        transactionId: created.id,
+        clientTxnId:        txn.clientTxnId,
+        ok:                 true,
+        transactionId:      created.id,
+        displayId:          created.displayId ?? null,
+        receiptPrintCount:  Number(txn.receiptPrintCount ?? 0),
+        receiptPrintsSynced: receiptSync ? Number(receiptSync.receiptPrintCount ?? 0) : 0,
       });
     } catch (error) {
       const message =
@@ -401,11 +902,17 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
 
       localDb
         .update(localTransactions)
-        .set({
-          syncStatus: "failed",
-          syncError: message,
-        })
+        .set({ syncStatus: "failed", syncError: message })
         .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
+        .run();
+
+      localDb
+        .insert(localSyncLogs)
+        .values({
+          eventId,
+          message: `Failed to sync local transaction ${txn.clientTxnId}: ${message}`,
+          createdAt: nowIso(),
+        })
         .run();
 
       results.push({
@@ -416,25 +923,30 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
     }
   }
 
-  localDb
-    .insert(localSyncLogs)
-    .values({
-      eventId,
-      message: `Sync complete. ${results.filter((r) => r.ok).length} synced, ${
-        results.filter((r) => !r.ok).length
-      } failed.`,
-      createdAt: nowIso(),
-    })
-    .run();
+  // 4. Sync cash drawer counts (after sessions so FK resolves)
+  const drawerSync = await syncLocalCashDrawerCountsToNeon(eventId);
+
+  // 5. Sync receipt print counts for any newly-synced transactions
+  const receiptPrintSync = await syncLocalReceiptPrintCountsToNeon(eventId);
 
   return {
     success: results.every((result) => result.ok),
-    total: results.length,
-    synced: results.filter((result) => result.ok).length,
-    failed: results.filter((result) => !result.ok).length,
+    total:   results.length,
+    synced:  results.filter((result) => result.ok).length,
+    failed:  results.filter((result) => !result.ok).length,
     results,
+    sessionSync,
+    drawerSync,
+    receiptPrintCountSync: {
+      inserted: receiptPrintSync.inserted,
+      processed: receiptPrintSync.processed,
+    },
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local stats
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function getLocalEventStats(eventId: number) {
   const txns = localDb
@@ -461,6 +973,7 @@ export async function getLocalEventStats(eventId: number) {
     .all();
 
   const todayPrefix = new Date().toISOString().slice(0, 10);
+
   const todayTxns = txns.filter((txn) =>
     String(txn.createdAt ?? "").startsWith(todayPrefix)
   );
@@ -471,32 +984,23 @@ export async function getLocalEventStats(eventId: number) {
     todayTxnIds.includes(item.clientTxnId)
   );
 
-  const txnCount = txns.length;
-  const revenue = txns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0);
-  const discount = txns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0);
-  const itemsSold = items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
-
-  const todayTxnCount  = todayTxns.length;
-  const todayRevenue   = todayTxns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0);
-  const todayDiscount  = todayTxns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0);
-  const todayItemsSold = todayItems.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
-
-  const totalUnits = stockItems.reduce((sum, item) => sum + Number(item.stock ?? 0), 0);
-  const totalItems = stockItems.length;
-
   return {
-    txnCount,
-    revenue,
-    discount,
-    itemsSold,
-    todayTxnCount,
-    todayRevenue,
-    todayDiscount,
-    todayItemsSold,
-    totalUnits,
-    totalItems,
+    txnCount:       txns.length,
+    revenue:        txns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0),
+    discount:       txns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0),
+    itemsSold:      items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0),
+    todayTxnCount:  todayTxns.length,
+    todayRevenue:   todayTxns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0),
+    todayDiscount:  todayTxns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0),
+    todayItemsSold: todayItems.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0),
+    totalUnits:     stockItems.reduce((sum, item) => sum + Number(item.stock ?? 0), 0),
+    totalItems:     stockItems.length,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local POS state
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function getLatestPreparedLocalEvent() {
   const event = localDb
@@ -509,28 +1013,38 @@ export function getLatestPreparedLocalEvent() {
   return event ?? null;
 }
 
+export function getLocalPendingSyncCount(eventId: number) {
+  const row = localDb
+    .select({
+      count: sql<number>`count(${localTransactions.clientTxnId})`,
+    })
+    .from(localTransactions)
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        inArray(localTransactions.syncStatus, ["pending", "failed"])
+      )
+    )
+    .get();
+
+  return Number(row?.count ?? 0);
+}
+
 export async function getLocalPOSState() {
   const event = getLatestPreparedLocalEvent();
 
   if (!event) {
-    return { hasPreparedEvent: false, event: null, pendingSyncCount: 0 };
+    return {
+      hasPreparedEvent: false,
+      event: null,
+      pendingSyncCount: 0,
+    };
   }
-
-  const [pendingRow] = localDb
-    .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
-    .from(localTransactions)
-    .where(
-      and(
-        eq(localTransactions.eventId, event.id),
-        inArray(localTransactions.syncStatus, ["pending", "failed"])
-      )
-    )
-    .all();
 
   return {
     hasPreparedEvent: true,
     event,
-    pendingSyncCount: Number(pendingRow?.count ?? 0),
+    pendingSyncCount: getLocalPendingSyncCount(event.id),
   };
 }
 
@@ -545,41 +1059,17 @@ export function getPreparedLocalEvents() {
 export async function getLocalPreparedEventsState() {
   const preparedEvents = getPreparedLocalEvents();
 
-  const eventsWithPending = preparedEvents.map((event) => {
-    const pendingRow = localDb
-      .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
-      .from(localTransactions)
-      .where(
-        and(
-          eq(localTransactions.eventId, event.id),
-          inArray(localTransactions.syncStatus, ["pending", "failed"])
-        )
-      )
-      .get();
-
-    return {
+  return {
+    events: preparedEvents.map((event) => ({
       ...event,
-      pendingSyncCount: Number(pendingRow?.count ?? 0),
-    };
-  });
-
-  return { events: eventsWithPending };
+      pendingSyncCount: getLocalPendingSyncCount(event.id),
+    })),
+  };
 }
 
-export function getLocalPendingSyncCount(eventId: number) {
-  const row = localDb
-    .select({ count: sql<number>`count(${localTransactions.clientTxnId})` })
-    .from(localTransactions)
-    .where(
-      and(
-        eq(localTransactions.eventId, eventId),
-        inArray(localTransactions.syncStatus, ["pending", "failed"])
-      )
-    )
-    .get();
-
-  return Number(row?.count ?? 0);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete local POS data
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function deleteLocalEventData(
   eventId: number,
@@ -610,11 +1100,34 @@ export function deleteLocalEventData(
         .where(inArray(localTransactionItems.clientTxnId, clientTxnIds))
         .run();
     }
-    tx.delete(localTransactions).where(eq(localTransactions.eventId, eventId)).run();
-    tx.delete(localPromos).where(eq(localPromos.eventId, eventId)).run();
-    tx.delete(localEventItems).where(eq(localEventItems.eventId, eventId)).run();
-    tx.delete(localSyncLogs).where(eq(localSyncLogs.eventId, eventId)).run();
-    tx.delete(localEvents).where(eq(localEvents.id, eventId)).run();
+
+    tx.delete(localTransactions)
+      .where(eq(localTransactions.eventId, eventId))
+      .run();
+
+    tx.delete(localCashDrawerCounts)
+      .where(eq(localCashDrawerCounts.eventId, eventId))
+      .run();
+
+    tx.delete(localCashierSessions)
+      .where(eq(localCashierSessions.eventId, eventId))
+      .run();
+
+    tx.delete(localPromos)
+      .where(eq(localPromos.eventId, eventId))
+      .run();
+
+    tx.delete(localEventItems)
+      .where(eq(localEventItems.eventId, eventId))
+      .run();
+
+    tx.delete(localSyncLogs)
+      .where(eq(localSyncLogs.eventId, eventId))
+      .run();
+
+    tx.delete(localEvents)
+      .where(eq(localEvents.id, eventId))
+      .run();
   });
 
   return {

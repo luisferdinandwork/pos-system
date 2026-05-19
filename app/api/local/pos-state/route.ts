@@ -1,11 +1,13 @@
 // app/api/local/pos-state/route.ts
 import { NextResponse } from "next/server";
-import { getLocalPOSState } from "@/lib/local-pos";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+    const { getLocalPOSState } = await import("@/lib/local-pos");
+
     const state = await getLocalPOSState();
 
     return NextResponse.json(state);

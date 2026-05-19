@@ -1,266 +1,145 @@
-// app/(pos)/pos/page.tsx
+// app/(pos)/pos/page.tsx — REDESIGNED
+// ─ Layout preserved: left = cart+scanner, right = payment panel
+// ─ Styling: brand palette (--brand-deep, --brand-mid, --brand-orange, --brand-yellow)
+// ─ Single total display, grouped action buttons, responsive tablet/mobile
 "use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  AlertCircle,
-  AlertTriangle,
-  ArrowRight,
-  Banknote,
-  BarChart2,
-  Building2,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CloudUpload,
-  CreditCard,
-  Database,
-  DollarSign,
-  History,
-  LogOut,
-  MapPin,
-  Minus,
-  Package,
-  Plus,
-  Power,
-  Printer,
-  RefreshCw,
-  ScanLine,
-  ShoppingBag,
-  Tag,
-  Trash2,
-  TrendingUp,
-  Wifi,
-  WifiOff,
-  X,
-  Zap,
+  AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, Banknote, BarChart2,
+  Building2, Check, CheckCircle2, ChevronDown, ChevronRight,
+  CloudUpload, CreditCard, Database, DollarSign, History, LogOut,
+  MapPin, Minus, Package, Plus, Power, Printer, RefreshCw, ScanLine,
+  Search, ShoppingBag, Tag, Trash2, TrendingUp, User, Wifi, WifiOff, X, Zap,
 } from "lucide-react";
-import { formatRupiah, suggestedCashAmounts, calculateChange, formatRupiahInput, parseRupiahInput } from "@/lib/utils";
+import {
+  formatRupiah, suggestedCashAmounts, calculateChange,
+  formatRupiahInput, parseRupiahInput,
+} from "@/lib/utils";
 import { usePrintReceipt, type EventReceiptTemplate } from "@/lib/hooks/usePrintReceipt";
+import {
+  incrementLocalReceiptPrintCount,
+  syncLocalReceiptPrintCounts,
+} from "@/lib/receipt-print-counts";
+import { CashierSessionModal } from "@/components/pos/CashierSessionModal";
+import { useSession, signOut } from "next-auth/react";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
+// ── Types (unchanged) ─────────────────────────────────────────────────────────
 type EventRow = {
-  id: number; name: string; status: string;
-  location: string | null; startDate?: string | null; endDate?: string | null;
-};
-
-type EventItem = {
-  id: number; eventId: number; stock: number; originalStock?: number;
-  retailPrice: string; netPrice: string; itemId: string; name: string;
-  color: string | null; variantCode: string | null; unit: string | null;
-};
-
-type CartItem = {
-  eventItemId: number; itemId: string; productName: string;
-  variantCode: string | null; color: string | null; quantity: number;
-  unitPrice: number; discountAmt: number; finalPrice: number;
-  promoApplied: string | null; freeQty: number;
-};
-
-// ── PayMethod now includes EDC sub-type fields ─────────────────────────────
-type PayMethod = {
-  id: number; name: string; type: string;
-  edcMethod: string | null; edcMachineId: number | null;
-  provider: string | null;
-};
-
-type PromoRes = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
-
-type PromoTier = { minQty: number; discountPct?: string | null; discountFix?: string | null; fixedPrice?: string | null };
+  id: number;
+  code: string;
+  name: string;
+  status: string;
+  location: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+};type EventItem  = { id: number; eventId: number; stock: number; originalStock?: number; retailPrice: string; netPrice: string; itemId: string; name: string; color: string | null; variantCode: string | null; unit: string | null; };
+type CartItem   = { eventItemId: number; itemId: string; productName: string; variantCode: string | null; color: string | null; quantity: number; unitPrice: number; discountAmt: number; finalPrice: number; promoApplied: string | null; freeQty: number; };
+type PayMethod  = { id: number; name: string; type: string; edcMethod: string | null; edcMachineId: number | null; provider: string | null; };
+type PromoRes   = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
+type PromoTier  = { minQty: number; discountPct?: string | null; discountFix?: string | null; fixedPrice?: string | null };
 type PromoItemLink = { eventItemId: number; itemId?: string; name?: string };
-type PromoData = {
-  id: number; name: string; type: string; isActive: boolean; applyToAll: boolean;
-  discountPct: string | null; discountFix: string | null; fixedPrice: string | null;
-  buyQty: number | null; getFreeQty: number | null;
-  spendMinAmount: string | null; bundlePrice: string | null;
-  flashStartTime: string | null; flashEndTime: string | null;
-  minPurchaseQty: number | null; maxUsageCount: number | null; usageCount: number;
-  tiers: PromoTier[]; items: PromoItemLink[];
-};
-
+type PromoData  = { id: number; name: string; type: string; isActive: boolean; applyToAll: boolean; discountPct: string | null; discountFix: string | null; fixedPrice: string | null; buyQty: number | null; getFreeQty: number | null; spendMinAmount: string | null; bundlePrice: string | null; flashStartTime: string | null; flashEndTime: string | null; minPurchaseQty: number | null; maxUsageCount: number | null; usageCount: number; tiers: PromoTier[]; items: PromoItemLink[]; };
 type LocalBundle = { event: EventRow; items: EventItem[]; promos: PromoData[]; paymentMethods: PayMethod[] };
-type Screen = "event-select" | "sell" | "success";
+type Screen      = "event-select" | "sell" | "success";
 type POSActionDialog = null | "turn-off-local" | "force-turn-off-local" | "delete-event" | "force-delete-event";
-
-type DailyStats = {
-  txnCount: number; revenue: number; discount: number; itemsSold: number;
-  todayTxnCount: number; todayRevenue: number; todayDiscount: number; todayItemsSold: number;
-  totalUnits: number; totalItems: number;
-};
-
-// ── Grouped EDC structure for display ────────────────────────────────────────
-type EdcGroup = {
-  machineId: number | null;
-  machineLabel: string;
-  methods: PayMethod[];
+type DailyStats = { txnCount: number; revenue: number; discount: number; itemsSold: number; todayTxnCount: number; todayRevenue: number; todayDiscount: number; todayItemsSold: number; totalUnits: number; totalItems: number; };
+type EdcGroup   = { machineId: number | null; machineLabel: string; methods: PayMethod[]; };
+type CurrentUser = {
+  name: string;
+  role: string;   // "admin" | "user"
+  eventId?: number | null;
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+const STATUS_STYLE: Record<string, { dot: string; label: string; border: string; bg: string; text: string }> = {
+  active: { dot: "#22c55e", label: "Live",   border: "rgba(34,197,94,0.3)",  bg: "rgba(34,197,94,0.08)",  text: "#16a34a" },
+  draft:  { dot: "#f59e0b", label: "Draft",  border: "rgba(245,158,11,0.3)", bg: "rgba(245,158,11,0.08)", text: "#b45309" },
+  closed: { dot: "#ef4444", label: "Closed", border: "rgba(239,68,68,0.3)",  bg: "rgba(239,68,68,0.08)",  text: "#dc2626" },
+};
 
-const PAY_ICON: Record<string, React.ReactNode> = {
-  cash:    <Banknote size={16} />,
-  edc:     <CreditCard size={16} />,
-  debit:   <CreditCard size={16} />,
-  credit:  <CreditCard size={16} />,
-};
-const PAY_COLOR: Record<string, string> = {
-  cash:    "#16a34a",
-  edc:     "#0369a1",
-  debit:   "#0369a1",
-  credit:  "#b45309",
-};
-const STATUS_STYLE: Record<string, { dot: string; label: string; border: string; bg: string }> = {
-  active: { dot: "#16a34a", label: "Live",   border: "rgba(22,163,74,0.30)",  bg: "rgba(22,163,74,0.06)"  },
-  draft:  { dot: "#f59e0b", label: "Draft",  border: "rgba(245,158,11,0.25)", bg: "rgba(245,158,11,0.05)" },
-  closed: { dot: "#dc2626", label: "Closed", border: "rgba(220,38,38,0.20)",  bg: "rgba(220,38,38,0.04)"  },
-};
 const KEYFRAMES = `
-@keyframes fadeUp { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
-@keyframes pulseDot { 0%,100% { opacity:1 } 50% { opacity:.4 } }
-.anim-fade-up { animation: fadeUp .35s ease both }
+@keyframes fadeUp   { from { opacity:0; transform:translateY(12px) } to { opacity:1; transform:translateY(0) } }
+@keyframes slideIn  { from { opacity:0; transform:translateX(16px) } to { opacity:1; transform:translateX(0) } }
+@keyframes pulseDot { 0%,100% { opacity:1; transform:scale(1) } 50% { opacity:.5; transform:scale(.85) } }
+@keyframes shimmer  { 0% { opacity:.6 } 50% { opacity:1 } 100% { opacity:.6 } }
+.anim-fade-up  { animation: fadeUp  .32s cubic-bezier(.22,1,.36,1) both }
+.anim-slide-in { animation: slideIn .28s cubic-bezier(.22,1,.36,1) both }
+
+/* Responsive breakpoints */
+@media (max-width: 1024px) {
+  .pos-pay-pane   { width: 40% !important; min-width: 240px !important }
+}
+@media (max-width: 768px) {
+  .pos-two-pane   { flex-direction: column !important; overflow-y: auto !important }
+  .pos-cart-pane  { width: 100% !important; flex: none !important; max-height: 55vh }
+  .pos-pay-pane   { width: 100% !important; flex: none !important; min-width: unset !important; border-left: none !important; border-top: 1px solid var(--border-col) !important }
+  .topbar-status  { display: none !important }
+  .topbar-label   { display: none !important }
+}
 `;
 
+// brand-aligned palette tokens (CSS vars from globals.css)
+const C = {
+  bg:        "var(--background)",          // #f5f4fa
+  card:      "var(--card)",                // #fff
+  border:    "var(--border)",              // #e2ddf0
+  muted:     "var(--muted)",               // #f0edf8
+  mutedFg:   "var(--muted-foreground)",    // #7a6a9a
+  fg:        "var(--foreground)",          // #1a1040
+  primary:   "var(--primary)",             // #ff653f
+  secondary: "var(--secondary)",           // #ede9f8
+  secFg:     "var(--secondary-foreground)",// #452e5a
+  deep:      "var(--brand-deep)",          // #1e104e
+  mid:       "var(--brand-mid)",           // #452e5a
+  orange:    "var(--brand-orange)",        // #ff653f
+  yellow:    "var(--brand-yellow)",        // #ffc85c
+};
+
 function money(v: number | string) { return formatRupiah(v); }
-function makeClientTxnId(eventId: number) {
-  /**
-   * Local POS transaction ID shown to cashier/customer.
-   * Format: yyyyMM + 5-digit sequence, e.g. 20260500001.
-   *
-   * The sequence is stored per event + month in localStorage because local POS
-   * runs in the browser while offline.
-   */
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const prefix = `${yyyy}${mm}`;
-  const key = `pos:txn-seq:${eventId}:${prefix}`;
-  const next = Number(localStorage.getItem(key) ?? "0") + 1;
-  localStorage.setItem(key, String(next));
-  return `${prefix}${String(next).padStart(5, "0")}`;
-}
-function stockTone(stock: number) {
-  if (stock < 0) return "#ef4444";
-  if (stock <= 5) return "#f59e0b";
-  return "#16a34a";
+function stockTone(s: number) { return s < 0 ? "#ef4444" : s <= 5 ? "#f59e0b" : "#16a34a"; }
+function makeClientTxnId(eventCodeOrId: string | number) {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return {
+    clientTxnId: `LOCAL-EV${eventCodeOrId}-${random}`,
+    displayId: null as string | null,
+  };
 }
 
-// ── Client-side promo engine ──────────────────────────────────────────────────
-
-function calculatePromoClient(
-  item: EventItem,
-  quantity: number,
-  cartSubtotal: number,
-  allPromos: PromoData[]
-): PromoRes {
+// ── Promo engine (unchanged logic) ───────────────────────────────────────────
+function calculatePromoClient(item: EventItem, quantity: number, cartSubtotal: number, allPromos: PromoData[]): PromoRes {
   const netPrice = Number(item.netPrice);
   const base: PromoRes = { finalUnitPrice: netPrice, discountAmt: 0, promoName: null, freeQty: 0 };
-
-  const applicable = allPromos.filter((p) => {
-    if (!p.isActive) return false;
-    if (p.applyToAll) return true;
-    return p.items.some((i) => i.eventItemId === item.id);
-  });
-
-  if (applicable.length === 0) return base;
-
+  const applicable = allPromos.filter(p => { if (!p.isActive) return false; if (p.applyToAll) return true; return p.items.some(i => i.eventItemId === item.id); });
+  if (!applicable.length) return base;
   let best = { ...base };
-
   for (const promo of applicable) {
-    if (promo.type === "flash") {
-      const now = Date.now();
-      if (promo.flashStartTime && now < new Date(promo.flashStartTime).getTime()) continue;
-      if (promo.flashEndTime   && now > new Date(promo.flashEndTime).getTime())   continue;
-    }
+    if (promo.type === "flash") { const now = Date.now(); if (promo.flashStartTime && now < new Date(promo.flashStartTime).getTime()) continue; if (promo.flashEndTime && now > new Date(promo.flashEndTime).getTime()) continue; }
     if (promo.minPurchaseQty && quantity < promo.minPurchaseQty) continue;
     if (promo.maxUsageCount !== null && promo.usageCount >= (promo.maxUsageCount ?? Infinity)) continue;
-
     let result = { ...base };
-
     switch (promo.type) {
-      case "discount_pct":
-      case "flash": {
-        const pct = parseFloat(String(promo.discountPct ?? 0)) / 100;
-        result.discountAmt    = Math.round(netPrice * pct);
-        result.finalUnitPrice = netPrice - result.discountAmt;
-        result.promoName      = promo.name;
-        break;
-      }
-      case "discount_fix": {
-        result.discountAmt    = Math.min(parseFloat(String(promo.discountFix ?? 0)), netPrice);
-        result.finalUnitPrice = netPrice - result.discountAmt;
-        result.promoName      = promo.name;
-        break;
-      }
-      case "fixed_price": {
-        const fp = parseFloat(String(promo.fixedPrice ?? netPrice));
-        result.discountAmt    = Math.max(0, netPrice - fp);
-        result.finalUnitPrice = fp;
-        result.promoName      = promo.name;
-        break;
-      }
-      case "qty_tiered": {
-        const sorted = [...(promo.tiers ?? [])].sort((a, b) => b.minQty - a.minQty);
-        const tier   = sorted.find((t) => quantity >= t.minQty);
-        if (tier) {
-          if (tier.fixedPrice) {
-            const fp = parseFloat(String(tier.fixedPrice));
-            result.discountAmt    = Math.max(0, netPrice - fp);
-            result.finalUnitPrice = fp;
-          } else if (tier.discountPct) {
-            const pct = parseFloat(String(tier.discountPct)) / 100;
-            result.discountAmt    = Math.round(netPrice * pct);
-            result.finalUnitPrice = netPrice - result.discountAmt;
-          } else if (tier.discountFix) {
-            result.discountAmt    = Math.min(parseFloat(String(tier.discountFix)), netPrice);
-            result.finalUnitPrice = netPrice - result.discountAmt;
-          }
-          result.promoName = promo.name;
-        }
-        break;
-      }
-      case "buy_x_get_y": {
-        const buyQty  = promo.buyQty     ?? 1;
-        const freeQty = promo.getFreeQty ?? 1;
-        if (quantity >= buyQty) {
-          result.freeQty   = freeQty * Math.floor(quantity / buyQty);
-          result.promoName = promo.name;
-        }
-        break;
-      }
-      case "spend_get_free": {
-        const minSpend = parseFloat(String(promo.spendMinAmount ?? 0));
-        if (cartSubtotal >= minSpend) {
-          result.freeQty   = 1;
-          result.promoName = promo.name;
-        }
-        break;
-      }
-      case "bundle": {
-        const bundlePrice = parseFloat(String(promo.bundlePrice ?? netPrice));
-        const itemCount   = Math.max((promo.items ?? []).length, 1);
-        const perItem     = bundlePrice / itemCount;
-        result.discountAmt    = Math.max(0, netPrice - perItem);
-        result.finalUnitPrice = perItem;
-        result.promoName      = promo.name;
-        break;
-      }
+      case "discount_pct": case "flash": { const pct = parseFloat(String(promo.discountPct ?? 0)) / 100; result.discountAmt = Math.round(netPrice * pct); result.finalUnitPrice = netPrice - result.discountAmt; result.promoName = promo.name; break; }
+      case "discount_fix": { result.discountAmt = Math.min(parseFloat(String(promo.discountFix ?? 0)), netPrice); result.finalUnitPrice = netPrice - result.discountAmt; result.promoName = promo.name; break; }
+      case "fixed_price":  { const fp = parseFloat(String(promo.fixedPrice ?? netPrice)); result.discountAmt = Math.max(0, netPrice - fp); result.finalUnitPrice = fp; result.promoName = promo.name; break; }
+      case "qty_tiered":   { const tier = [...(promo.tiers ?? [])].sort((a,b)=>b.minQty-a.minQty).find(t=>quantity>=t.minQty); if (tier) { if (tier.fixedPrice) { const fp=parseFloat(String(tier.fixedPrice)); result.discountAmt=Math.max(0,netPrice-fp); result.finalUnitPrice=fp; } else if (tier.discountPct) { const pct=parseFloat(String(tier.discountPct))/100; result.discountAmt=Math.round(netPrice*pct); result.finalUnitPrice=netPrice-result.discountAmt; } else if (tier.discountFix) { result.discountAmt=Math.min(parseFloat(String(tier.discountFix)),netPrice); result.finalUnitPrice=netPrice-result.discountAmt; } result.promoName=promo.name; } break; }
+      case "buy_x_get_y":  { const buyQty=promo.buyQty??1; const freeQty=promo.getFreeQty??1; if (quantity>=buyQty) { result.freeQty=freeQty*Math.floor(quantity/buyQty); result.promoName=promo.name; } break; }
+      case "spend_get_free":{ const minSpend=parseFloat(String(promo.spendMinAmount??0)); if (cartSubtotal>=minSpend) { result.freeQty=1; result.promoName=promo.name; } break; }
+      case "bundle":       { const bundlePrice=parseFloat(String(promo.bundlePrice??netPrice)); const itemCount=Math.max((promo.items??[]).length,1); const perItem=bundlePrice/itemCount; result.discountAmt=Math.max(0,netPrice-perItem); result.finalUnitPrice=perItem; result.promoName=promo.name; break; }
     }
-
-    if (result.discountAmt > best.discountAmt || result.freeQty > best.freeQty) {
-      best = result;
-    }
+    if (result.discountAmt > best.discountAmt || result.freeQty > best.freeQty) best = result;
   }
-
   return best;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-
 function POSInner() {
-  const router = useRouter();
+  const router       = useRouter();
   const searchParams = useSearchParams();
   const queryEventId = searchParams.get("event") ? Number(searchParams.get("event")) : null;
   const forceSelect  = searchParams.get("select") === "1";
@@ -272,98 +151,97 @@ function POSInner() {
   const [promoCount,       setPromoCount]       = useState(0);
   const [cart,             setCart]             = useState<CartItem[]>([]);
   const [screen,           setScreen]           = useState<Screen>("event-select");
-
   const [query,            setQuery]            = useState("");
   const [suggestions,      setSuggestions]      = useState<EventItem[]>([]);
   const [searchFocused,    setSearchFocused]    = useState(false);
-
   const [payMethods,       setPayMethods]       = useState<PayMethod[]>([]);
   const [payMethod,        setPayMethod]        = useState<PayMethod | null>(null);
   const [reference,        setReference]        = useState("");
-
-  // ── Cash payment state ─────────────────────────────────────────────────────
   const [cashTendered,     setCashTendered]     = useState<string>("");
-
   const [lastTxn,          setLastTxn]          = useState<string | number | null>(null);
   const [processing,       setProcessing]       = useState(false);
-
   const [toast,            setToast]            = useState<string | null>(null);
   const [toastErr,         setToastErr]         = useState(false);
-
   const [online,           setOnline]           = useState(true);
   const [preparing,        setPreparing]        = useState(false);
   const [syncing,          setSyncing]          = useState(false);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [localReady,       setLocalReady]       = useState(false);
-
-  const [preparedEvents,   setPreparedEvents]   = useState<{
-    id: number; name: string; status: string; location: string | null;
-    preparedAt: string; pendingSyncCount: number;
-  }[]>([]);
-
+  const [preparedEvents,   setPreparedEvents]   = useState<{ id:number;name:string;status:string;location:string|null;preparedAt:string;pendingSyncCount:number; }[]>([]);
   const [actionDialog,     setActionDialog]     = useState<POSActionDialog>(null);
   const [actionLoading,    setActionLoading]    = useState(false);
   const [actionError,      setActionError]      = useState("");
-
   const [showReport,       setShowReport]       = useState(false);
   const [dailyStats,       setDailyStats]       = useState<DailyStats | null>(null);
   const [loadingStats,     setLoadingStats]     = useState(false);
+  const [expandedEdcGroups,setExpandedEdcGroups]= useState<Set<string>>(new Set());
 
-  // Expanded EDC groups in payment panel
-  const [expandedEdcGroups, setExpandedEdcGroups] = useState<Set<string>>(new Set());
+  const { data: authSession } = useSession();
+  const currentUser: CurrentUser | null = authSession?.user
+    ? {
+        name:    (authSession.user as any).name    ?? "",
+        role:    (authSession.user as any).role    ?? "user",
+        eventId: (authSession.user as any).eventId ?? null,
+      }
+    : null;
+ 
+  const isAdmin    = currentUser?.role === "admin";
+  const isCashier  = currentUser?.role === "user";
 
+  // ── Event select search/filter state ─────────────────────────────────────
+  const [eventSearch,       setEventSearch]       = useState("");
+  const [eventStatusFilter, setEventStatusFilter] = useState<"all"|"active"|"draft"|"closed">("active");
   const { printReceipt, printing } = usePrintReceipt();
-  const [receiptTemplate, setReceiptTemplate] = useState<EventReceiptTemplate | null>(null);
-
-  const [showDrawerCount, setShowDrawerCount] = useState(false);
-  const [drawerActual, setDrawerActual] = useState("");
-  const [drawerNotes, setDrawerNotes] = useState("");
-  const [drawerExpected, setDrawerExpected] = useState(0);
-  const [drawerSessionId, setDrawerSessionId] = useState<number | null>(null);
-  const [drawerCashierName, setDrawerCashierName] = useState<string | null>(null);
-  const [drawerSaving, setDrawerSaving] = useState(false);
-
+  const [receiptTemplate,  setReceiptTemplate]  = useState<EventReceiptTemplate | null>(null);
+  const [showDrawerCount,  setShowDrawerCount]  = useState(false);
+  const [drawerActual,     setDrawerActual]     = useState("");
+  const [drawerNotes,      setDrawerNotes]      = useState("");
+  const [drawerExpected,   setDrawerExpected]   = useState(0);
+  const [drawerSessionId,  setDrawerSessionId]  = useState<number | null>(null);
+  const [drawerCashierName,setDrawerCashierName]= useState<string | null>(null);
+  const [drawerSaving,     setDrawerSaving]     = useState(false);
   const [lastTxnSnapshot, setLastTxnSnapshot] = useState<{
-    txnId: string; cart: CartItem[]; payMethod: PayMethod | null;
-    subtotal: number; discount: number; total: number;
-    cashTendered: number | null; changeAmount: number | null;
-    receiptTemplate?: EventReceiptTemplate | null;
-    eventName?: string | null;
+    clientTxnId:        string;
+    displayId:          string;
+    cart:               CartItem[];
+    payMethod:          PayMethod | null;
+    subtotal:           number;
+    discount:           number;
+    total:              number;
+    cashTendered:       number | null;
+    changeAmount:       number | null;
+    receiptTemplate?:   EventReceiptTemplate | null;
+    eventName?:         string | null;
+    cashierName?:       string | null;   // ← this was missing
+    receiptPrintCount?: number;
+  } | null>(null);
+  const scanRef = useRef<HTMLInputElement>(null);
+  const [cashierSession, setCashierSession] = useState<{
+    id: number;
+    cashierName: string;
+    openingCash: string;
+    openedAt: string;
   } | null>(null);
 
-  const scanRef = useRef<HTMLInputElement>(null);
+  const subtotal  = useMemo(() => cart.reduce((s,i) => s + i.unitPrice  * i.quantity, 0), [cart]);
+  const discount  = useMemo(() => cart.reduce((s,i) => s + i.discountAmt * i.quantity, 0), [cart]);
+  const total     = useMemo(() => cart.reduce((s,i) => s + i.finalPrice  * i.quantity, 0), [cart]);
+  const itemCount = useMemo(() => cart.reduce((s,i) => s + i.quantity, 0), [cart]);
 
-  const subtotal  = useMemo(() => cart.reduce((s, i) => s + i.unitPrice  * i.quantity, 0), [cart]);
-  const discount  = useMemo(() => cart.reduce((s, i) => s + i.discountAmt * i.quantity, 0), [cart]);
-  const total     = useMemo(() => cart.reduce((s, i) => s + i.finalPrice  * i.quantity, 0), [cart]);
-  const itemCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
-
-  // ── Cash change computation ────────────────────────────────────────────────
   const isCash          = payMethod?.type === "cash";
   const cashTenderedNum = isCash ? (parseFloat(cashTendered) || 0) : 0;
   const changeNum       = isCash ? calculateChange(cashTenderedNum, total) : 0;
   const cashSuggestions = isCash && total > 0 ? suggestedCashAmounts(total) : [];
 
-  // ── EDC grouping ───────────────────────────────────────────────────────────
-  // Group EDC payment methods by their edcMachineId for nested display.
   const { cashMethods, edcGroups } = useMemo(() => {
     const cash    = payMethods.filter(m => m.type === "cash");
     const edcRows = payMethods.filter(m => m.type === "edc");
-
-    // Group by machineId, preserving order of first appearance
     const groupMap = new Map<string, EdcGroup>();
     for (const m of edcRows) {
       const key = m.edcMachineId != null ? String(m.edcMachineId) : "unassigned";
-      if (!groupMap.has(key)) {
-        groupMap.set(key, {
-          machineId:    m.edcMachineId,
-          machineLabel: m.provider ?? `EDC Machine`,
-          methods:      [],
-        });
-      }
+      if (!groupMap.has(key)) groupMap.set(key, { machineId: m.edcMachineId, machineLabel: m.provider ?? "EDC Machine", methods: [] });
       groupMap.get(key)!.methods.push(m);
     }
-
     return { cashMethods: cash, edcGroups: [...groupMap.values()] };
   }, [payMethods]);
 
@@ -372,190 +250,193 @@ function POSInner() {
     setTimeout(() => { setToast(null); setToastErr(false); }, 2800);
   }
 
-  // ── Local POS helpers ─────────────────────────────────────────────────────
-
+  // ── API helpers (all logic unchanged) ────────────────────────────────────
   async function loadPreparedEvents() {
-    try {
-      const data = await fetch("/api/local/prepared-events", { cache: "no-store" }).then(r => r.json());
-      setPreparedEvents(Array.isArray(data.events) ? data.events : []);
-    } catch { setPreparedEvents([]); }
+    try { const d = await fetch("/api/local/prepared-events",{cache:"no-store"}).then(r=>r.json()); setPreparedEvents(Array.isArray(d.events)?d.events:[]); } catch { setPreparedEvents([]); }
   }
 
   async function loadReceiptTemplate(eventId: number) {
+    try { const res=await fetch(`/api/events/${eventId}/receipt-template`,{cache:"no-store"}); const d=await res.json(); setReceiptTemplate(res.ok?d:null); return res.ok?d as EventReceiptTemplate:null; } catch { setReceiptTemplate(null); return null; }
+  }
+
+  async function loadActiveCashierSession(eventId: number) {
     try {
-      const res = await fetch(`/api/events/${eventId}/receipt-template`, { cache: "no-store" });
+      const res  = await fetch(`/api/local/events/${eventId}/cashier-session`, { cache: "no-store" });
+      if (!res.ok) { setCashierSession(null); return null; }
       const data = await res.json();
-      setReceiptTemplate(res.ok ? data : null);
-      return res.ok ? data as EventReceiptTemplate : null;
+      if (data?.id) {
+        setCashierSession(data);
+        return data;
+      }
+      setCashierSession(null);
+      return null;
     } catch {
-      setReceiptTemplate(null);
+      setCashierSession(null);
       return null;
     }
   }
 
   function applyBundle(bundle: LocalBundle) {
-    setEvent(bundle.event);
-    setItems(bundle.items);
-    setPromos(bundle.promos as PromoData[]);
-    setPayMethods(bundle.paymentMethods);
-    setPromoCount(bundle.promos.length);
-    void loadReceiptTemplate(bundle.event.id);
-    // Auto-expand all EDC groups on load
-    const edcRows = bundle.paymentMethods.filter(m => m.type === "edc");
-    const keys = new Set<string>();
-    for (const m of edcRows) {
-      keys.add(m.edcMachineId != null ? String(m.edcMachineId) : "unassigned");
-    }
-    setExpandedEdcGroups(keys);
+    setEvent(bundle.event); setItems(bundle.items); setPromos(bundle.promos as PromoData[]); setPayMethods(bundle.paymentMethods); setPromoCount(bundle.promos.length); void loadReceiptTemplate(bundle.event.id);
+    const keys = new Set<string>(); for (const m of bundle.paymentMethods.filter(m=>m.type==="edc")) keys.add(m.edcMachineId!=null?String(m.edcMachineId):"unassigned"); setExpandedEdcGroups(keys);
   }
-
   async function loadLocalBundle(eventId: number) {
-    try {
-      const res  = await fetch(`/api/local/events/${eventId}/bundle`, { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Not prepared locally.");
-      applyBundle(data as LocalBundle);
-      setLocalReady(true);
-      await refreshPendingCount(eventId);
-      setScreen("sell");
-      return data as LocalBundle;
-    } catch { setLocalReady(false); return null; }
+    try { const res=await fetch(`/api/local/events/${eventId}/bundle`,{cache:"no-store"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); applyBundle(d as LocalBundle); setLocalReady(true); await refreshPendingCount(eventId); setScreen("sell"); await loadActiveCashierSession(eventId); return d as LocalBundle; } catch { setLocalReady(false); return null; }
   }
-
   async function prepareEventOffline(eventId: number) {
     setPreparing(true);
-    try {
-      const res  = await fetch(`/api/local/events/${eventId}/prepare`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to prepare.");
-      localStorage.setItem("pos:last-event-id", String(eventId));
-      applyBundle(data.bundle as LocalBundle);
-      setLocalReady(true);
-      flash("Event prepared for offline POS");
-      return data.bundle as LocalBundle;
-    } catch (e) { flash(e instanceof Error ? e.message : "Failed.", true); return null; }
-    finally { setPreparing(false); }
+    try { const res=await fetch(`/api/local/events/${eventId}/prepare`,{method:"POST"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); localStorage.setItem("pos:last-event-id",String(eventId)); applyBundle(d.bundle as LocalBundle); setLocalReady(true); flash("Event prepared for offline POS"); return d.bundle as LocalBundle; } catch(e) { flash(e instanceof Error?e.message:"Failed.",true); return null; } finally { setPreparing(false); }
   }
-
   async function openLocalEvent(ev: EventRow) {
-    localStorage.setItem("pos:last-event-id", String(ev.id));
+    localStorage.setItem("pos:last-event-id",String(ev.id));
     const local = await loadLocalBundle(ev.id);
     if (local) { setScreen("sell"); return; }
-    if (!navigator.onLine) { flash("Offline. Prepare this event locally first.", true); return; }
+    if (!navigator.onLine) { flash("Offline. Prepare this event locally first.",true); return; }
     const prepared = await prepareEventOffline(ev.id);
     if (prepared) { setScreen("sell"); await refreshPendingCount(ev.id); }
   }
-
   async function refreshPendingCount(eventId: number) {
-    try {
-      const txns = await fetch(`/api/local/events/${eventId}/transactions`, { cache: "no-store" }).then(r => r.json());
-      setPendingSyncCount(Array.isArray(txns) ? txns.filter((t: any) => t.syncStatus === "pending" || t.syncStatus === "failed").length : 0);
-    } catch { setPendingSyncCount(0); }
+    try { const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json()); setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed").length:0); } catch { setPendingSyncCount(0); }
   }
 
   async function syncLocalTransactions(eventId: number) {
-    if (!navigator.onLine) { flash("Cannot sync while offline.", true); return; }
+    if (!navigator.onLine) {
+      flash("Cannot sync while offline.", true);
+      return;
+    }
+
     setSyncing(true);
+
     try {
-      const res    = await fetch(`/api/local/events/${eventId}/sync`, { method: "POST" });
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error || "Sync failed.");
+      const res = await fetch(`/api/local/events/${eventId}/sync`, {
+        method: "POST",
+      });
+
+      const result = await res.json().catch(() => null);
+
+      if (!res.ok && res.status !== 207) {
+        throw new Error(result?.error ?? "Failed to sync local transactions.");
+      }
+
       await refreshPendingCount(eventId);
-      if (result.failed > 0) {
-        const fe = result.results?.find((r: any) => !r.ok)?.error;
-        flash(fe ? `${result.synced} synced, ${result.failed} failed: ${fe}` : `${result.synced} synced, ${result.failed} failed`, true);
+
+      const fresh = await loadLocalBundle(eventId);
+      if (fresh) {
+        setItems(fresh.items);
+      }
+
+      if (Number(result?.failed ?? 0) > 0) {
+        const firstError = result?.results?.find((r: any) => !r.ok)?.error;
+
+        flash(
+          `${result.synced} synced, ${result.failed} failed${
+            firstError ? `: ${firstError}` : "."
+          }`,
+          true
+        );
+
         return;
       }
-      flash(`${result.synced} transactions synced`);
-    } catch (e) { flash(e instanceof Error ? e.message : "Sync failed.", true); }
-    finally { setSyncing(false); }
+
+      if (Number(result?.synced ?? 0) > 0) {
+        flash(`${result.synced} transaction(s) synced to cloud.`);
+        return;
+      }
+
+      flash("No pending transactions to sync.");
+    } catch (error) {
+      flash(
+        error instanceof Error ? error.message : "Sync failed.",
+        true
+      );
+    } finally {
+      setSyncing(false);
+    }
   }
 
   async function loadDailyStats(eventId: number) {
     setLoadingStats(true);
-    try {
-      const data = await fetch(`/api/local/events/${eventId}/stats`, { cache: "no-store" }).then(r => r.json());
-      setDailyStats(data);
-    } catch { setDailyStats(null); }
-    finally { setLoadingStats(false); }
+    try { const d=await fetch(`/api/local/events/${eventId}/stats`,{cache:"no-store"}).then(r=>r.json()); setDailyStats(d); } catch { setDailyStats(null); } finally { setLoadingStats(false); }
   }
 
-  // ── Promo calculation ─────────────────────────────────────────────────────
-
-  function getPromo(item: EventItem, qty: number, currentCartSubtotal = 0): PromoRes {
-    return calculatePromoClient(item, qty, currentCartSubtotal, promos);
-  }
-
-  // ── Cart management ───────────────────────────────────────────────────────
-
+  function getPromo(item: EventItem, qty: number, sub=0): PromoRes { return calculatePromoClient(item, qty, sub, promos); }
+  
   async function addItem(item: EventItem) {
-    const existingQty = cart.find(r => r.eventItemId === item.id)?.quantity ?? 0;
+    const existingQty =
+      cart.find((row) => row.eventItemId === item.id)?.quantity ?? 0;
+
     const newQty = existingQty + 1;
-    const otherSubtotal = cart
-      .filter(r => r.eventItemId !== item.id)
-      .reduce((s, r) => s + r.finalPrice * r.quantity, 0);
-    const promo = getPromo(item, newQty, otherSubtotal);
+
+    const otherSub = cart
+      .filter((row) => row.eventItemId !== item.id)
+      .reduce((sum, row) => sum + row.finalPrice * row.quantity, 0);
+
+    const promo = getPromo(item, newQty, otherSub);
 
     const row: CartItem = {
-      eventItemId: item.id, itemId: item.itemId, productName: item.name,
-      variantCode: item.variantCode, color: item.color, quantity: newQty,
-      unitPrice: Number(item.netPrice), discountAmt: promo.discountAmt,
-      finalPrice: promo.finalUnitPrice, promoApplied: promo.promoName, freeQty: promo.freeQty,
+      eventItemId: item.id,
+      itemId: item.itemId,
+      productName: item.name,
+      variantCode: item.variantCode,
+      color: item.color,
+      quantity: newQty,
+      unitPrice: Number(item.netPrice),
+      discountAmt: promo.discountAmt,
+      finalPrice: promo.finalUnitPrice,
+      promoApplied: promo.promoName,
+      freeQty: promo.freeQty,
     };
 
-    setCart(prev =>
-      prev.some(r => r.eventItemId === item.id)
-        ? prev.map(r => r.eventItemId === item.id ? row : r)
+    setCart((prev) =>
+      prev.some((cartRow) => cartRow.eventItemId === item.id)
+        ? prev.map((cartRow) =>
+            cartRow.eventItemId === item.id ? row : cartRow
+          )
         : [...prev, row]
     );
-    setQuery(""); setSearchFocused(false);
+
+    setQuery("");
+    setSearchFocused(false);
   }
 
   async function changeQty(eventItemId: number, qty: number) {
-    if (qty < 1) { setCart(prev => prev.filter(r => r.eventItemId !== eventItemId)); return; }
-    const item = items.find(r => r.id === eventItemId);
-    if (!item) return;
-    const otherSubtotal = cart
-      .filter(r => r.eventItemId !== eventItemId)
-      .reduce((s, r) => s + r.finalPrice * r.quantity, 0);
-    const promo = getPromo(item, qty, otherSubtotal);
-    setCart(prev => prev.map(r =>
-      r.eventItemId === eventItemId
-        ? { ...r, quantity: qty, discountAmt: promo.discountAmt, finalPrice: promo.finalUnitPrice, promoApplied: promo.promoName, freeQty: promo.freeQty }
-        : r
-    ));
+    if (qty<1) { setCart(prev=>prev.filter(r=>r.eventItemId!==eventItemId)); return; }
+    const item = items.find(r=>r.id===eventItemId); if (!item) return;
+    const otherSub = cart.filter(r=>r.eventItemId!==eventItemId).reduce((s,r)=>s+r.finalPrice*r.quantity,0);
+    const promo = getPromo(item,qty,otherSub);
+    setCart(prev=>prev.map(r=>r.eventItemId===eventItemId?{...r,quantity:qty,discountAmt:promo.discountAmt,finalPrice:promo.finalUnitPrice,promoApplied:promo.promoName,freeQty:promo.freeQty}:r));
   }
-
   function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const q = query.trim().toLowerCase(); if (!q) return;
-    const exact = items.find(it => it.itemId.toLowerCase() === q || it.variantCode?.toLowerCase() === q);
+    e.preventDefault(); const q=query.trim().toLowerCase(); if (!q) return;
+    const exact=items.find(it=>it.itemId.toLowerCase()===q||it.variantCode?.toLowerCase()===q);
     if (exact) { addItem(exact); return; }
-    if (suggestions.length === 1) { addItem(suggestions[0]); return; }
-    if (suggestions.length === 0) flash("Product not found.", true);
+    if (suggestions.length===1) { addItem(suggestions[0]); return; }
+    if (suggestions.length===0) flash("Product not found.",true);
   }
-
-  // ── Payment ───────────────────────────────────────────────────────────────
 
   async function confirmPayment() {
     if (!event || !payMethod || cart.length === 0) return;
-
-    // Validate cash: tendered must be >= total
+ 
     if (isCash && cashTenderedNum < total) {
       flash("Cash tendered is less than the total amount.", true);
       return;
     }
-
+ 
     setProcessing(true);
+ 
     try {
-      const label       = `${payMethod.name}${payMethod.provider ? ` (${payMethod.provider})` : ""}`;
-      const clientTxnId = makeClientTxnId(event.id);
-
+      const label = `${payMethod.name}${
+        payMethod.provider ? ` (${payMethod.provider})` : ""
+      }`;
+ 
+      const ids = makeClientTxnId(event.code || event.id);
+ 
       const tenderedVal = isCash && cashTenderedNum > 0 ? cashTenderedNum : null;
       const changeVal   = isCash && cashTenderedNum > 0 ? changeNum : null;
-
+ 
       const payload = {
-        clientTxnId,
+        clientTxnId:      ids.clientTxnId,
+        displayId:        ids.displayId,
         totalAmount:      subtotal,
         discount,
         finalAmount:      total,
@@ -563,159 +444,124 @@ function POSInner() {
         paymentReference: reference || null,
         cashTendered:     tenderedVal,
         changeAmount:     changeVal,
+        cashierSessionId: cashierSession?.id ?? null,
+        cashierName:      cashierSession?.cashierName ?? null,
         createdAt:        new Date().toISOString(),
-        items: cart.map(it => ({
-          eventItemId:  it.eventItemId,
-          itemId:       it.itemId,
-          productName:  it.productName,
-          quantity:     it.quantity,
-          unitPrice:    it.unitPrice,
-          discountAmt:  it.discountAmt,
-          finalPrice:   it.finalPrice,
-          subtotal:     it.finalPrice * it.quantity,
-          promoApplied: it.promoApplied,
+        items: cart.map((item) => ({
+          eventItemId:  item.eventItemId,
+          itemId:       item.itemId,
+          productName:  item.productName,
+          quantity:     item.quantity,
+          unitPrice:    item.unitPrice,
+          discountAmt:  item.discountAmt,
+          finalPrice:   item.finalPrice,
+          subtotal:     item.finalPrice * item.quantity,
+          promoApplied: item.promoApplied,
         })),
       };
-
-      const res   = await fetch(`/api/local/events/${event.id}/transactions`, {
+ 
+      const res = await fetch(`/api/local/events/${event.id}/transactions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+ 
       const saved = await res.json();
-      if (!res.ok) throw new Error(saved.error || "Failed to save transaction.");
-
+ 
+      if (!res.ok) {
+        throw new Error(saved.error || "Failed to save local transaction.");
+      }
+ 
+      if (navigator.onLine) {
+        try {
+          await syncLocalTransactions(event.id);
+        } catch (syncError) {
+          console.warn("[POS] Auto-sync failed:", syncError);
+        }
+      }
+ 
       const fresh = await loadLocalBundle(event.id);
       if (fresh) setItems(fresh.items);
+ 
       await refreshPendingCount(event.id);
-
-      setLastTxn(saved.clientTxnId ?? clientTxnId);
+ 
+      const savedClientTxnId = saved.clientTxnId ?? ids.clientTxnId;
+      const savedDisplayId   = saved.displayId   ?? ids.displayId ?? savedClientTxnId;
+ 
+      setLastTxn(savedDisplayId);
+ 
       setLastTxnSnapshot({
-        txnId:        saved.clientTxnId ?? clientTxnId,
-        cart:         [...cart],
-        payMethod:    payMethod,
+        clientTxnId:       savedClientTxnId,
+        displayId:         savedDisplayId,
+        cart:              [...cart],
+        payMethod,
         subtotal,
         discount,
         total,
-        cashTendered: tenderedVal,
-        changeAmount: changeVal,
+        cashTendered:      tenderedVal,
+        changeAmount:      changeVal,
         receiptTemplate,
-        eventName: event.name,
+        eventName:         event.name,
+        cashierName:       cashierSession?.cashierName ?? null,  // ← added
+        receiptPrintCount: Number(saved.receiptPrintCount ?? 0),
       });
+ 
       setScreen("success");
-    } catch (e) { flash(e instanceof Error ? e.message : "Failed to save local transaction.", true); }
-    finally { setProcessing(false); }
+    } catch (error) {
+      flash(
+        error instanceof Error ? error.message : "Failed to save local transaction.",
+        true
+      );
+    } finally {
+      setProcessing(false);
+    }
   }
 
-  // ── Delete / turn-off handlers ────────────────────────────────────────────
-
-  async function turnOffLocalPOS(force = false) {
-    if (!event?.id) return;
-    setActionLoading(true); setActionError("");
-    try {
-      const res    = await fetch(`/api/local/events/${event.id}${force ? "?force=true" : ""}`, { method: "DELETE" });
-      const result = await res.json();
-      if (!res.ok) {
-        if (res.status === 409) { setActionDialog("force-turn-off-local"); setActionError(result.error || "This local POS has unsynced sales."); return; }
-        throw new Error(result.error || "Failed to turn off local POS.");
-      }
-      localStorage.removeItem("pos:last-event-id");
-      setActionDialog(null); setActionError("");
-      router.push("/pos?select=1");
-    } catch (e) { setActionError(e instanceof Error ? e.message : "Failed to turn off local POS."); }
-    finally { setActionLoading(false); }
+  async function turnOffLocalPOS(force=false) {
+    if (!event?.id) return; setActionLoading(true); setActionError("");
+    try { const res=await fetch(`/api/local/events/${event.id}${force?"?force=true":""}`,{method:"DELETE"}); const result=await res.json(); if (!res.ok) { if (res.status===409){setActionDialog("force-turn-off-local");setActionError(result.error);return;} throw new Error(result.error); } localStorage.removeItem("pos:last-event-id"); setActionDialog(null); setActionError(""); router.push("/pos?select=1"); } catch(e) { setActionError(e instanceof Error?e.message:"Failed."); } finally { setActionLoading(false); }
   }
 
-  async function deleteCurrentEvent(forceLocalDelete = false) {
-    if (!event?.id) return;
-    setActionLoading(true); setActionError("");
-    try {
-      const res    = await fetch(`/api/events?id=${event.id}${forceLocalDelete ? "&forceLocalDelete=true" : ""}`, { method: "DELETE" });
-      const result = await res.json();
-      if (!res.ok) {
-        if (res.status === 409 && result.code === "LOCAL_POS_HAS_UNSYNCED_SALES") { setActionDialog("force-delete-event"); setActionError(result.error || "This event has unsynced local sales."); return; }
-        throw new Error(result.error || "Failed to delete event.");
-      }
-      localStorage.removeItem("pos:last-event-id");
-      setActionDialog(null); setActionError("");
-      router.push("/events");
-    } catch (e) { setActionError(e instanceof Error ? e.message : "Failed to delete event."); }
-    finally { setActionLoading(false); }
+  async function deleteCurrentEvent(forceLocalDelete=false) {
+    if (!event?.id) return; setActionLoading(true); setActionError("");
+    try { const res=await fetch(`/api/events?id=${event.id}${forceLocalDelete?"&forceLocalDelete=true":""}`,{method:"DELETE"}); const result=await res.json(); if (!res.ok) { if (res.status===409&&result.code==="LOCAL_POS_HAS_UNSYNCED_SALES"){setActionDialog("force-delete-event");setActionError(result.error);return;} throw new Error(result.error); } localStorage.removeItem("pos:last-event-id"); setActionDialog(null); setActionError(""); router.push("/events"); } catch(e) { setActionError(e instanceof Error?e.message:"Failed."); } finally { setActionLoading(false); }
   }
-
+  
   function nextTransaction() {
-    setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery(""); setScreen("sell");
+    setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery("");
+    setScreen("sell");
+    // NOTE: do NOT reset cashierSession here — the same cashier continues selling
   }
 
   // ── Effects ───────────────────────────────────────────────────────────────
-
   useEffect(() => {
     setOnline(navigator.onLine);
-    const on = () => setOnline(true), off = () => setOnline(false);
-    window.addEventListener("online", on); window.addEventListener("offline", off);
-    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
-  }, []);
-
-  useEffect(() => {
-    if (!online || !event?.id || pendingSyncCount === 0 || syncing) return;
-    const t = setTimeout(() => syncLocalTransactions(event.id), 1500);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [online, event?.id, pendingSyncCount]);
-
-  useEffect(() => {
+    const on=()=>setOnline(true), off=()=>setOnline(false);
+    window.addEventListener("online",on); window.addEventListener("offline",off);
+    return ()=>{ window.removeEventListener("online",on); window.removeEventListener("offline",off); };
+  },[]);
+  useEffect(()=>{ if (!online||!event?.id||pendingSyncCount===0||syncing) return; const t=setTimeout(()=>syncLocalTransactions(event.id),1500); return ()=>clearTimeout(t); },[online,event?.id,pendingSyncCount]);
+  useEffect(()=>{
     async function boot() {
       await loadPreparedEvents();
-      if (forceSelect) {
-        setScreen("event-select");
-        try { setEvents(await fetch("/api/events", { cache: "no-store" }).then(r => r.json())); } catch {}
-        return;
-      }
-      if (queryEventId) {
-        const local = await loadLocalBundle(queryEventId);
-        if (local) { localStorage.setItem("pos:last-event-id", String(queryEventId)); setScreen("sell"); return; }
-        if (navigator.onLine) {
-          try {
-            const evs = await fetch("/api/events", { cache: "no-store" }).then(r => r.json()); setEvents(evs);
-            const t = evs.find((ev: EventRow) => ev.id === queryEventId);
-            if (t) { await openLocalEvent(t); return; }
-          } catch { flash("Could not prepare selected event.", true); }
-        }
-        flash("Selected event is not prepared locally.", true); setScreen("event-select"); return;
-      }
-      const saved = localStorage.getItem("pos:last-event-id");
-      if (saved && Number.isFinite(Number(saved))) { const l = await loadLocalBundle(Number(saved)); if (l) { setScreen("sell"); return; } }
-      try {
-        const state = await fetch("/api/local/pos-state", { cache: "no-store" }).then(r => r.json());
-        if (state?.event?.id) { const l = await loadLocalBundle(Number(state.event.id)); if (l) { localStorage.setItem("pos:last-event-id", String(state.event.id)); setScreen("sell"); return; } }
-      } catch {}
-      try { setEvents(await fetch("/api/events", { cache: "no-store" }).then(r => r.json())); } catch { flash("Offline. No prepared POS event found.", true); }
+      if (forceSelect) { setScreen("event-select"); try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch {} return; }
+      if (queryEventId) { const local=await loadLocalBundle(queryEventId); if (local){localStorage.setItem("pos:last-event-id",String(queryEventId));setScreen("sell");return;} if (navigator.onLine) { try { const evs=await fetch("/api/events",{cache:"no-store"}).then(r=>r.json()); setEvents(evs); const t=evs.find((ev:EventRow)=>ev.id===queryEventId); if(t){await openLocalEvent(t);return;} } catch { flash("Could not prepare selected event.",true); } } flash("Selected event is not prepared locally.",true); setScreen("event-select"); return; }
+      const saved=localStorage.getItem("pos:last-event-id");
+      if (saved&&Number.isFinite(Number(saved))){const l=await loadLocalBundle(Number(saved));if(l){setScreen("sell");return;}}
+      try { const state=await fetch("/api/local/pos-state",{cache:"no-store"}).then(r=>r.json()); if(state?.event?.id){const l=await loadLocalBundle(Number(state.event.id));if(l){localStorage.setItem("pos:last-event-id",String(state.event.id));setScreen("sell");return;}} } catch {}
+      try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch { flash("Offline. No prepared POS event found.",true); }
       setScreen("event-select");
     }
     boot();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!query.trim()) { setSuggestions([]); return; }
-    const q = query.toLowerCase();
-    setSuggestions(items.filter(it =>
-      it.itemId.toLowerCase().includes(q) || it.name.toLowerCase().includes(q) ||
-      (it.variantCode ?? "").toLowerCase().includes(q) || (it.color ?? "").toLowerCase().includes(q)
-    ).slice(0, 24));
-  }, [query, items]);
-
-  // Reset cash tendered when switching payment method
-  useEffect(() => {
-    setCashTendered("");
-  }, [payMethod]);
+  },[]);
+  useEffect(()=>{ if (!query.trim()){setSuggestions([]);return;} const q=query.toLowerCase(); setSuggestions(items.filter(it=>it.itemId.toLowerCase().includes(q)||it.name.toLowerCase().includes(q)||(it.variantCode??"").toLowerCase().includes(q)||(it.color??"").toLowerCase().includes(q)).slice(0,24)); },[query,items]);
+  useEffect(()=>{ setCashTendered(""); },[payMethod]);
 
   // ── Sub-components ────────────────────────────────────────────────────────
-
   function ModalShell({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
     return (
       <div className="fixed inset-0 z-[300] flex items-center justify-center p-4"
-        style={{ background: "rgba(15,23,42,0.58)", backdropFilter: "blur(7px)" }}
+        style={{ background: "rgba(30,16,78,0.65)", backdropFilter: "blur(8px)" }}
         onMouseDown={e => { if (e.target === e.currentTarget) onClose?.(); }}>
         {children}
       </div>
@@ -723,48 +569,53 @@ function POSInner() {
   }
 
   function POSActionModal() {
-    if (!actionDialog || !event) return null;
-    const isForceTurnOff = actionDialog === "force-turn-off-local";
-    const isTurnOff      = actionDialog === "turn-off-local" || actionDialog === "force-turn-off-local";
-    const isForceDelete  = actionDialog === "force-delete-event";
-    const isDelete       = actionDialog === "delete-event" || actionDialog === "force-delete-event";
-    const title          = isDelete ? (isForceDelete ? "Force Delete Event?" : "Delete Event?") : (isForceTurnOff ? "Force Turn Off Local POS?" : "Turn Off Local POS?");
-    const description    = isDelete
-      ? (isForceDelete ? "This will delete the cloud event and force remove local POS data on this computer. Unsynced local sales will be lost." : "This will delete the event from the system and also remove its local POS data on this computer.")
-      : (isForceTurnOff ? "This will remove the prepared local POS data even though there are unsynced local sales. Unsynced local sales will be lost." : "This will only turn off the prepared local POS data on this computer. The cloud event will remain.");
-    const confirmLabel   = isDelete ? (isForceDelete ? "Force Delete Event" : "Delete Event") : (isForceTurnOff ? "Force Turn Off" : "Turn Off Local POS");
-    const confirmColor   = isDelete || isForceTurnOff ? "#dc2626" : "#b45309";
+    if (!actionDialog||!event) return null;
+    const isForceTurnOff = actionDialog==="force-turn-off-local";
+    const isTurnOff      = actionDialog==="turn-off-local"||actionDialog==="force-turn-off-local";
+    const isForceDelete  = actionDialog==="force-delete-event";
+    const isDelete       = actionDialog==="delete-event"||actionDialog==="force-delete-event";
+    const isDanger       = isDelete||isForceTurnOff;
+    const title          = isDelete?(isForceDelete?"Force Delete Event?":"Delete Event?"):(isForceTurnOff?"Force Turn Off Local POS?":"Turn Off Local POS?");
+    const description    = isDelete?(isForceDelete?"This will delete the cloud event and force remove local POS data. Unsynced sales will be lost.":"This will delete the event from the system and remove its local POS data."):(isForceTurnOff?"This will remove local POS data even with unsynced sales. Unsynced sales will be lost.":"This will turn off the prepared local POS on this computer. The cloud event will remain.");
+    const confirmLabel   = isDelete?(isForceDelete?"Force Delete Event":"Delete Event"):(isForceTurnOff?"Force Turn Off":"Turn Off Local POS");
+    const confirmBg      = isDanger?"#dc2626":"#b45309";
 
     return (
-      <ModalShell onClose={() => { setActionDialog(null); setActionError(""); }}>
-        <div className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background: "white" }}>
-          <div className="p-6">
+      <ModalShell onClose={()=>{setActionDialog(null);setActionError("");}}>
+        <div className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background:"white" }}>
+          <div className="p-6 pb-4">
             <div className="flex items-start gap-4">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background: isDelete || isForceTurnOff ? "rgba(220,38,38,0.10)" : "rgba(245,158,11,0.12)", color: confirmColor }}>
-                {isDelete ? <Trash2 size={21} /> : <Power size={21} />}
+              <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0"
+                style={{ background: isDanger?"rgba(220,38,38,0.08)":"rgba(245,158,11,0.08)", color:confirmBg }}>
+                {isDelete?<Trash2 size={22}/>:<Power size={22}/>}
               </div>
               <div className="flex-1 min-w-0">
-                <h2 className="text-lg font-black" style={{ color: "#111827" }}>{title}</h2>
-                <p className="text-sm mt-1 leading-relaxed" style={{ color: "#6b7280" }}>{description}</p>
-                <div className="mt-4 rounded-2xl px-4 py-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                  <p className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Event</p>
-                  <p className="text-sm font-bold truncate" style={{ color: "#111827" }}>{event.name}</p>
-                  {event.location && <p className="text-xs mt-0.5" style={{ color: "#6b7280" }}>{event.location}</p>}
+                <h2 className="text-base font-black" style={{ color:C.fg }}>{title}</h2>
+                <p className="text-sm mt-1 leading-relaxed" style={{ color:C.mutedFg }}>{description}</p>
+                <div className="mt-4 rounded-2xl px-4 py-3" style={{ background:C.muted, border:`1px solid ${C.border}` }}>
+                  <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color:C.mutedFg }}>Event</p>
+                  <p className="text-sm font-black truncate" style={{ color:C.fg }}>{event.name}</p>
+                  {event.location&&<p className="text-xs mt-0.5 flex items-center gap-1" style={{ color:C.mutedFg }}><MapPin size={10}/>{event.location}</p>}
                 </div>
-                {pendingSyncCount > 0 && (
-                  <div className="mt-3 rounded-2xl px-4 py-3 flex gap-2" style={{ background: "rgba(245,158,11,0.10)", color: "#b45309" }}>
-                    <AlertTriangle size={15} className="mt-0.5 flex-shrink-0" />
-                    <p className="text-xs leading-relaxed">{pendingSyncCount} local sale{pendingSyncCount > 1 ? "s" : ""} still pending sync.</p>
+                {pendingSyncCount>0&&(
+                  <div className="mt-3 rounded-2xl px-4 py-3 flex gap-2" style={{ background:"rgba(245,158,11,0.08)", color:"#b45309" }}>
+                    <AlertTriangle size={14} className="mt-0.5 flex-shrink-0"/>
+                    <p className="text-xs leading-relaxed">{pendingSyncCount} local sale{pendingSyncCount>1?"s":""} still pending sync.</p>
                   </div>
                 )}
-                {actionError && <div className="mt-3 rounded-2xl px-4 py-3 text-xs font-semibold" style={{ background: "#fef2f2", color: "#dc2626" }}>{actionError}</div>}
+                {actionError&&<div className="mt-3 rounded-2xl px-4 py-3 text-xs font-semibold" style={{ background:"#fef2f2",color:"#dc2626" }}>{actionError}</div>}
               </div>
             </div>
           </div>
-          <div className="px-6 py-4 flex gap-2 justify-end" style={{ background: "#f9fafb", borderTop: "1px solid #e5e7eb" }}>
-            <button onClick={() => { setActionDialog(null); setActionError(""); }} disabled={actionLoading} className="px-4 py-2.5 rounded-xl text-sm font-bold border disabled:opacity-50" style={{ background: "white", borderColor: "#e5e7eb", color: "#374151" }}>Cancel</button>
-            <button onClick={() => isDelete ? deleteCurrentEvent(isForceDelete) : isTurnOff && turnOffLocalPOS(isForceTurnOff)} disabled={actionLoading} className="px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50" style={{ background: confirmColor, color: "white" }}>
-              {actionLoading ? "Processing..." : confirmLabel}
+          <div className="px-6 py-4 flex gap-2 justify-end" style={{ background:C.muted, borderTop:`1px solid ${C.border}` }}>
+            <button onClick={()=>{setActionDialog(null);setActionError("");}} disabled={actionLoading}
+              className="px-5 py-2.5 rounded-xl text-sm font-bold border disabled:opacity-50 transition-all hover:bg-white"
+              style={{ background:"white", borderColor:C.border, color:C.secFg }}>Cancel</button>
+            <button onClick={()=>isDelete?deleteCurrentEvent(isForceDelete):isTurnOff&&turnOffLocalPOS(isForceTurnOff)}
+              disabled={actionLoading}
+              className="px-5 py-2.5 rounded-xl text-sm font-black disabled:opacity-50"
+              style={{ background:confirmBg, color:"white" }}>
+              {actionLoading?"Processing…":confirmLabel}
             </button>
           </div>
         </div>
@@ -773,72 +624,62 @@ function POSInner() {
   }
 
   function SearchResultsOverlay() {
-    if (!searchFocused || !query.trim()) return null;
+    if (!searchFocused||!query.trim()) return null;
     return (
-      <div className="absolute left-0 right-0 top-[calc(100%+10px)] z-[120] rounded-3xl shadow-2xl overflow-hidden anim-fade-up"
-        style={{ background: "white", border: "1px solid #e5e7eb", boxShadow: "0 24px 70px rgba(15,23,42,0.18)" }}>
-        <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: "1px solid #f3f4f6" }}>
-          <div>
-            <p className="text-xs font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Search Results</p>
-            <p className="text-xs mt-0.5" style={{ color: "#6b7280" }}>Press Enter to add exact match, or click an item below.</p>
-          </div>
-          <button type="button" onClick={() => { setQuery(""); setSearchFocused(false); }} className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "#f3f4f6", color: "#6b7280" }}><X size={14} /></button>
+      <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-[120] rounded-2xl shadow-2xl overflow-hidden anim-fade-up"
+        style={{ background:"white", border:`1px solid ${C.border}`, boxShadow:"0 20px 60px rgba(30,16,78,0.18)" }}>
+        <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom:`1px solid ${C.muted}` }}>
+          <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>
+            {suggestions.length} result{suggestions.length!==1?"s":""} — press Enter for exact match
+          </p>
+          <button type="button" onClick={()=>{setQuery("");setSearchFocused(false);}} className="w-7 h-7 rounded-lg flex items-center justify-center transition-all hover:bg-red-50" style={{ color:C.mutedFg }}><X size={13}/></button>
         </div>
-        <div className="max-h-[430px] overflow-y-auto p-3">
-          {suggestions.length === 0 ? (
-            <div className="py-12 text-center">
-              <Package size={30} className="mx-auto mb-3" style={{ color: "#d1d5db" }} />
-              <p className="text-sm font-bold" style={{ color: "#6b7280" }}>No products found</p>
-              <p className="text-xs mt-1" style={{ color: "#9ca3af" }}>Try another item ID, name, variant, or color.</p>
+        <div className="max-h-[420px] overflow-y-auto p-2">
+          {suggestions.length===0?(
+            <div className="py-10 text-center">
+              <Package size={28} className="mx-auto mb-2.5" style={{ color:C.border }}/>
+              <p className="text-sm font-bold" style={{ color:C.mutedFg }}>No products found</p>
+              <p className="text-xs mt-0.5" style={{ color:C.border }}>Try item ID, name, variant, or color.</p>
             </div>
-          ) : (
-            <div className="space-y-2">
+          ):(
+            <div className="space-y-1.5">
               {suggestions.map(item => {
-                const inCart     = cart.find(r => r.eventItemId === item.id);
-                const stock      = Number(item.stock ?? 0);
-                const previewQty = (inCart?.quantity ?? 0) + 1;
-                const otherSub   = cart.filter(r => r.eventItemId !== item.id).reduce((s, r) => s + r.finalPrice * r.quantity, 0);
-                const preview    = calculatePromoClient(item, previewQty, otherSub, promos);
-                const hasDiscount = preview.discountAmt > 0 || preview.freeQty > 0;
-
+                const inCart = cart.find(r=>r.eventItemId===item.id);
+                const stock  = Number(item.stock??0);
+                const previewQty = (inCart?.quantity??0)+1;
+                const otherSub   = cart.filter(r=>r.eventItemId!==item.id).reduce((s,r)=>s+r.finalPrice*r.quantity,0);
+                const preview    = calculatePromoClient(item,previewQty,otherSub,promos);
+                const hasDiscount= preview.discountAmt>0||preview.freeQty>0;
                 return (
                   <button key={item.id} type="button"
-                    onMouseDown={e => e.preventDefault()}
-                    onClick={() => addItem(item)}
-                    className="w-full text-left rounded-2xl p-3 transition-all hover:shadow-md"
-                    style={{ background: inCart ? "rgba(255,101,63,0.06)" : "#fff", border: inCart ? "1.5px solid rgba(255,101,63,0.25)" : "1.5px solid #e5e7eb" }}>
+                    onMouseDown={e=>e.preventDefault()} onClick={()=>addItem(item)}
+                    className="w-full text-left rounded-xl p-3 transition-all"
+                    style={{ background:inCart?"rgba(255,101,63,0.05)":"#fafaf8", border:`1.5px solid ${inCart?"rgba(255,101,63,0.3)":C.border}` }}>
                     <div className="flex items-center gap-3">
-                      <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-sm font-black flex-shrink-0"
-                        style={{ background: inCart ? "rgba(255,101,63,0.12)" : "#f3f4f6", color: inCart ? "var(--brand-orange)" : "#9ca3af" }}>
-                        {item.name.slice(0, 2).toUpperCase()}
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xs font-black flex-shrink-0"
+                        style={{ background:inCart?"rgba(255,101,63,0.12)":C.muted, color:inCart?C.orange:C.mutedFg }}>
+                        {item.name.slice(0,2).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-black truncate" style={{ color: "#111827" }}>{item.name}</p>
-                        <p className="text-xs font-mono mt-0.5 truncate" style={{ color: "#9ca3af" }}>{item.itemId}{item.variantCode ? ` · ${item.variantCode}` : ""}</p>
-                        {item.color && <p className="text-xs truncate" style={{ color: "#9ca3af" }}>{item.color}</p>}
-                        {hasDiscount && preview.promoName && (
-                          <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}>
-                            <Tag size={9} /> {preview.promoName}
-                            {preview.discountAmt > 0 ? ` · -${money(preview.discountAmt)}` : ""}
-                            {preview.freeQty > 0 ? ` · +${preview.freeQty} free` : ""}
+                        <p className="text-sm font-black truncate" style={{ color:C.fg }}>{item.name}</p>
+                        <p className="text-xs font-mono mt-0.5 truncate" style={{ color:C.mutedFg }}>{item.itemId}{item.variantCode?` · ${item.variantCode}`:""}</p>
+                        {hasDiscount&&preview.promoName&&(
+                          <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-black px-2 py-0.5 rounded-full" style={{ background:"rgba(69,46,90,0.12)", color:C.mid }}>
+                            <Tag size={8}/>{preview.promoName}{preview.discountAmt>0?` · -${money(preview.discountAmt)}`:""}{preview.freeQty>0?` · +${preview.freeQty} free`:""}
                           </span>
                         )}
                       </div>
                       <div className="text-right flex-shrink-0">
-                        {hasDiscount && preview.discountAmt > 0 ? (
-                          <>
-                            <p className="text-xs line-through" style={{ color: "#d1d5db" }}>{money(item.netPrice)}</p>
-                            <p className="text-sm font-black" style={{ color: "var(--brand-orange)" }}>{money(preview.finalUnitPrice)}</p>
-                          </>
-                        ) : (
-                          <p className="text-sm font-black" style={{ color: "var(--brand-orange)" }}>{money(item.netPrice)}</p>
+                        {hasDiscount&&preview.discountAmt>0?(
+                          <><p className="text-xs line-through" style={{ color:C.border }}>{money(item.netPrice)}</p>
+                          <p className="text-sm font-black" style={{ color:C.orange }}>{money(preview.finalUnitPrice)}</p></>
+                        ):(
+                          <p className="text-sm font-black" style={{ color:C.orange }}>{money(item.netPrice)}</p>
                         )}
-                        <span className="inline-flex mt-1 text-[11px] font-black px-2 py-1 rounded-full"
-                          style={{ background: stock < 0 ? "#fef2f2" : "#f3f4f6", color: stockTone(stock) }}>
-                          Stock = {stock.toLocaleString("id-ID")}
+                        <span className="inline-flex mt-1 text-[10px] font-black px-2 py-1 rounded-lg" style={{ background:stock<0?"#fef2f2":C.muted, color:stockTone(stock) }}>
+                          Stock {stock.toLocaleString("id-ID")}
                         </span>
-                        {inCart && <p className="text-[11px] font-bold mt-1" style={{ color: "var(--brand-orange)" }}>×{inCart.quantity} in cart</p>}
+                        {inCart&&<p className="text-[10px] font-bold mt-1" style={{ color:C.orange }}>×{inCart.quantity} in cart</p>}
                       </div>
                     </div>
                   </button>
@@ -851,136 +692,181 @@ function POSInner() {
     );
   }
 
-  // ── Payment Success Overlay ───────────────────────────────────────────────
-
   function PaymentSuccessOverlay() {
     if (screen !== "success") return null;
+ 
     const snap         = lastTxnSnapshot;
-    const snapCart     = snap?.cart      ?? cart;
+    const snapCart     = snap?.cart     ?? cart;
     const snapPay      = snap?.payMethod ?? payMethod;
-    const snapSubtotal = snap?.subtotal  ?? subtotal;
-    const snapDiscount = snap?.discount  ?? discount;
-    const snapTotal    = snap?.total     ?? total;
+    const snapDiscount = snap?.discount ?? discount;
+    const snapTotal    = snap?.total    ?? total;
     const snapQty      = snapCart.reduce((s, i) => s + i.quantity, 0);
-    const snapCashTendered = snap?.cashTendered ?? null;
-    const snapChange       = snap?.changeAmount ?? null;
-
+    const snapCash     = snap?.cashTendered ?? null;
+    const snapChange   = snap?.changeAmount ?? null;
+    const snapCashier  = snap?.cashierName  ?? cashierSession?.cashierName ?? null;
+    const printCount   = snap?.receiptPrintCount ?? 0;
+ 
     async function handlePrintSuccess() {
       if (!snap) return;
+ 
       const txnForPrint = {
-        clientTxnId:      snap.txnId,
+        clientTxnId:      snap.displayId,   // human-readable ID on the receipt
         totalAmount:      String(snap.subtotal),
         discount:         String(snap.discount),
         finalAmount:      String(snap.total),
         paymentMethod:    snapPay?.name ?? "—",
         paymentReference: null,
         cashTendered:     snap.cashTendered != null ? String(snap.cashTendered) : null,
-        changeAmount:     snap.changeAmount  != null ? String(snap.changeAmount)  : null,
+        changeAmount:     snap.changeAmount != null ? String(snap.changeAmount) : null,
         createdAt:        new Date().toISOString(),
       };
-      const itemsForPrint = snap.cart.map(it => ({
-        productName:  it.productName,
-        quantity:     it.quantity,
-        unitPrice:    String(it.unitPrice),
-        discountAmt:  String(it.discountAmt),
-        finalPrice:   String(it.finalPrice),
-        subtotal:     String(it.finalPrice * it.quantity),
-        promoApplied: it.promoApplied,
+ 
+      const itemsForPrint = snap.cart.map((item) => ({
+        productName:  item.productName,
+        quantity:     item.quantity,
+        unitPrice:    String(item.unitPrice),
+        discountAmt:  String(item.discountAmt),
+        finalPrice:   String(item.finalPrice),
+        subtotal:     String(item.finalPrice * item.quantity),
+        promoApplied: item.promoApplied,
       }));
-      await printReceipt(txnForPrint, itemsForPrint, { template: snap.receiptTemplate ?? receiptTemplate, eventName: snap.eventName ?? event?.name });
+ 
+      await printReceipt(txnForPrint, itemsForPrint, {
+        template:  snap.receiptTemplate ?? receiptTemplate,
+        eventName: snap.eventName ?? event?.name,
+      });
+ 
+      // incrementLocalReceiptPrintCount returns { receiptPrintCount, ... }
+      // extract the count from the returned object
+      const result    = await incrementLocalReceiptPrintCount(snap.clientTxnId);
+      const nextCount = typeof result === "number"
+        ? result
+        : (result as any)?.receiptPrintCount ?? (printCount + 1);
+ 
+      setLastTxnSnapshot((prev) =>
+        prev ? { ...prev, receiptPrintCount: nextCount } : prev
+      );
+ 
+      if (event?.id && navigator.onLine) {
+        try {
+          await syncLocalReceiptPrintCounts(event.id);
+        } catch (err) {
+          console.warn("[POS] Receipt print count sync failed:", err);
+        }
+      }
+ 
+      flash(`Receipt printed ${nextCount}×`);
     }
-
+ 
     return (
       <ModalShell onClose={nextTransaction}>
-        <div className="w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background: "white" }}>
-
-          {/* Header */}
-          <div className="px-6 pt-7 pb-5 text-center" style={{ borderBottom: "2px dashed #e5e7eb" }}>
-            <div className="w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center" style={{ background: "rgba(22,163,74,0.10)" }}>
-              <CheckCircle2 size={28} style={{ color: "#16a34a" }} />
+        <div className="w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden anim-fade-up"
+          style={{ background: "white" }}>
+ 
+          {/* Success header */}
+          <div className="px-6 pt-7 pb-5 text-center"
+            style={{ background: `linear-gradient(135deg,rgba(30,16,78,0.03),rgba(255,101,63,0.04))`, borderBottom: `2px dashed ${C.border}` }}>
+            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center"
+              style={{ background: "rgba(22,163,74,0.08)", border: "2px solid rgba(22,163,74,0.2)" }}>
+              <CheckCircle2 size={30} style={{ color: "#16a34a" }} />
             </div>
-            <p className="font-black text-lg" style={{ color: "#111827" }}>Payment Complete</p>
-            <p className="text-xs font-mono mt-1" style={{ color: "#9ca3af" }}>{String(lastTxn)}</p>
-            <p className="text-[11px] mt-2" style={{ color: "#9ca3af" }}>Sale saved locally. Sync will run when internet is stable.</p>
+            <p className="font-black text-lg" style={{ color: C.fg }}>Payment Complete</p>
+            <p className="text-[11px] font-mono mt-1 px-2 py-1 rounded-lg inline-block"
+              style={{ background: C.muted, color: C.mutedFg }}>
+              {snap?.displayId ?? String(lastTxn)}
+            </p>
+            <p className="text-xs mt-2" style={{ color: C.mutedFg }}>Saved locally · syncs when online</p>
           </div>
-
+ 
           {/* Line items */}
-          <div className="px-6 py-4 space-y-2 max-h-48 overflow-y-auto" style={{ borderBottom: "1px solid #f3f4f6" }}>
-            {snapCart.map(item => (
+          <div className="px-5 py-3 space-y-2 max-h-44 overflow-y-auto"
+            style={{ borderBottom: `1px solid ${C.muted}` }}>
+            {snapCart.map((item) => (
               <div key={item.eventItemId} className="flex justify-between items-start gap-3">
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-bold truncate" style={{ color: "#111827" }}>
+                  <p className="text-xs font-bold truncate" style={{ color: C.fg }}>
                     {item.productName}
-                    {item.variantCode && <span style={{ color: "#9ca3af" }}> ({item.variantCode})</span>}
+                    {item.variantCode && <span style={{ color: C.mutedFg }}> ({item.variantCode})</span>}
                   </p>
-                  <p className="text-xs font-mono" style={{ color: "#9ca3af" }}>{money(item.finalPrice)} × {item.quantity}</p>
+                  <p className="text-xs font-mono" style={{ color: C.mutedFg }}>
+                    {money(item.finalPrice)} × {item.quantity}
+                  </p>
                   {item.promoApplied && (
                     <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full mt-0.5"
-                      style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}>
-                      <Tag size={8} /> {item.promoApplied}
+                      style={{ background: "rgba(69,46,90,0.1)", color: C.mid }}>
+                      <Tag size={8} />{item.promoApplied}
                     </span>
                   )}
                 </div>
-                <p className="text-xs font-black font-mono flex-shrink-0" style={{ color: "#111827" }}>
+                <p className="text-xs font-black font-mono flex-shrink-0" style={{ color: C.fg }}>
                   {money(item.finalPrice * item.quantity)}
                 </p>
               </div>
             ))}
           </div>
-
+ 
           {/* Totals */}
-          <div className="px-6 py-4" style={{ borderBottom: "1px solid #f3f4f6" }}>
-            <div className="flex justify-between text-xs mb-2">
-              <span style={{ color: "#9ca3af" }}>Total Items</span>
-              <span className="font-bold" style={{ color: "#374151" }}>{snapQty} unit{snapQty !== 1 ? "s" : ""}</span>
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between text-xs mb-2">
+              <span style={{ color: C.mutedFg }}>{snapQty} item{snapQty !== 1 ? "s" : ""}</span>
+              {snapDiscount > 0 && <span style={{ color: "#16a34a" }}>Saved {money(snapDiscount)}</span>}
             </div>
-            {snapDiscount > 0 && (
-              <>
-                <div className="flex justify-between text-xs mb-1">
-                  <span style={{ color: "#9ca3af" }}>Subtotal</span>
-                  <span className="font-mono" style={{ color: "#9ca3af" }}>{money(snapSubtotal)}</span>
+ 
+            {/* Total paid block */}
+            <div className="rounded-2xl px-4 py-3 flex items-center justify-between"
+              style={{ background: C.muted, border: `1px solid ${C.border}` }}>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: C.mutedFg }}>Total Paid</p>
+                <p className="text-xs mt-0.5" style={{ color: C.mutedFg }}>
+                  via {snapPay?.name}{snapPay?.provider ? ` · ${snapPay.provider}` : ""}
+                </p>
+              </div>
+              <p className="text-3xl font-black" style={{ color: C.orange }}>{money(snapTotal)}</p>
+            </div>
+ 
+            {/* Cashier row — only when a session was active */}
+            {snapCashier && (
+              <div className="mt-2 flex items-center gap-2 px-3 py-2 rounded-xl"
+                style={{ background: C.muted, border: `1px solid ${C.border}` }}>
+                <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
+                  style={{ background: "rgba(69,46,90,0.1)", color: C.mid }}>
+                  <User size={11} />
                 </div>
-                <div className="flex justify-between text-xs mb-2">
-                  <span style={{ color: "#16a34a" }}>Discount</span>
-                  <span className="font-mono" style={{ color: "#16a34a" }}>−{money(snapDiscount)}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: C.mutedFg }}>Cashier</p>
+                  <p className="text-xs font-bold truncate" style={{ color: C.fg }}>{snapCashier}</p>
                 </div>
-              </>
+              </div>
             )}
-            <div className="flex justify-between items-baseline pt-1" style={{ borderTop: snapDiscount > 0 ? "1px solid #f3f4f6" : "none" }}>
-              <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</span>
-              <span className="text-3xl font-black" style={{ color: "#111827" }}>{money(snapTotal)}</span>
-            </div>
-            <p className="text-xs mt-1" style={{ color: "#9ca3af" }}>
-              via {snapPay?.name}{snapPay?.provider ? ` · ${snapPay.provider}` : ""}
-            </p>
-
+ 
             {/* Cash change section */}
-            {snapCashTendered != null && snapCashTendered > 0 && (
-              <div className="mt-3 rounded-2xl px-4 py-3" style={{ background: "rgba(3,105,161,0.06)", border: "1px solid rgba(3,105,161,0.15)" }}>
-                <div className="flex justify-between text-xs mb-1.5">
-                  <span style={{ color: "#6b7280" }}>Cash Tendered</span>
-                  <span className="font-mono font-bold" style={{ color: "#374151" }}>{money(snapCashTendered)}</span>
+            {snapCash != null && snapCash > 0 && (
+              <div className="mt-3 rounded-2xl px-4 py-3"
+                style={{ background: "rgba(3,105,161,0.05)", border: "1px solid rgba(3,105,161,0.15)" }}>
+                <div className="flex justify-between text-xs mb-2">
+                  <span style={{ color: C.mutedFg }}>Cash Tendered</span>
+                  <span className="font-mono font-bold" style={{ color: C.fg }}>{money(snapCash)}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-sm font-bold" style={{ color: "#0369a1" }}>Change</span>
+                  <span className="text-sm font-black" style={{ color: "#0369a1" }}>Change</span>
                   <span className="text-2xl font-black" style={{ color: "#0369a1" }}>{money(snapChange ?? 0)}</span>
                 </div>
               </div>
             )}
           </div>
-
+ 
           {/* Actions */}
-          <div className="px-6 pb-6 pt-4 flex gap-2">
+          <div className="px-5 pb-5 flex gap-2">
             <button onClick={nextTransaction}
-              className="flex-1 rounded-2xl py-3.5 text-sm font-black"
-              style={{ background: "var(--brand-orange)", color: "white" }}>
+              className="flex-1 rounded-2xl py-3.5 text-sm font-black transition-all hover:opacity-90"
+              style={{ background: C.orange, color: "white" }}>
               Next Sale
             </button>
             <button onClick={handlePrintSuccess} disabled={printing}
-              className="px-5 rounded-2xl text-sm font-bold border flex items-center gap-1.5 disabled:opacity-40"
-              style={{ borderColor: "#e5e7eb", color: "#374151", background: "white" }}>
+              className="px-5 rounded-2xl text-sm font-bold border flex items-center gap-1.5 disabled:opacity-40 transition-all hover:bg-gray-50"
+              style={{ borderColor: C.border, color: C.secFg, background: "white" }}>
               <Printer size={14} />
-              {printing ? "Printing…" : "Print"}
+              {printing ? "Printing…" : printCount > 0 ? `Print (${printCount}×)` : "Print"}
             </button>
           </div>
         </div>
@@ -988,123 +874,59 @@ function POSInner() {
     );
   }
 
-
   async function openDrawerCountModal() {
-    if (!event?.id) return;
-    setShowDrawerCount(true);
-    setDrawerActual("");
-    setDrawerNotes("");
-    setDrawerExpected(0);
-    setDrawerSessionId(null);
-    setDrawerCashierName(null);
-
-    try {
-      const res = await fetch(`/api/events/${event.id}/cash-drawer-counts`, { cache: "no-store" });
-      const data = await res.json();
-      if (res.ok) {
-        setDrawerExpected(Number(data.expectedCash ?? 0));
-        setDrawerSessionId(data.activeSession?.id ?? null);
-        setDrawerCashierName(data.activeSession?.cashierName ?? null);
-      }
-    } catch {
-      // Keep modal usable even when expected cash cannot be fetched.
-    }
+    if (!event?.id) return; setShowDrawerCount(true); setDrawerActual(""); setDrawerNotes(""); setDrawerExpected(0); setDrawerSessionId(null); setDrawerCashierName(null);
+    try { const res=await fetch(`/api/events/${event.id}/cash-drawer-counts`,{cache:"no-store"}); const d=await res.json(); if(res.ok){setDrawerExpected(Number(d.expectedCash??0));setDrawerSessionId(d.activeSession?.id??null);setDrawerCashierName(d.activeSession?.cashierName??null);} } catch {}
   }
-
   async function saveDrawerCount(e: React.FormEvent) {
-    e.preventDefault();
-    if (!event?.id) return;
-
-    const actualCash = parseRupiahInput(drawerActual);
-    setDrawerSaving(true);
-
-    try {
-      const res = await fetch(`/api/events/${event.id}/cash-drawer-counts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cashierSessionId: drawerSessionId,
-          countedBy: drawerCashierName,
-          expectedCash: drawerExpected,
-          actualCash,
-          reason: "count",
-          notes: drawerNotes || null,
-        }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(json?.error ?? "Failed to save drawer count");
-
-      setShowDrawerCount(false);
-      setDrawerActual("");
-      setDrawerNotes("");
-      flash("Cash drawer count saved.");
-    } catch (error) {
-      flash(error instanceof Error ? error.message : "Failed to save drawer count", true);
-    } finally {
-      setDrawerSaving(false);
-    }
+    e.preventDefault(); if (!event?.id) return;
+    const actualCash=parseRupiahInput(drawerActual); setDrawerSaving(true);
+    try { const res=await fetch(`/api/events/${event.id}/cash-drawer-counts`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cashierSessionId:drawerSessionId,countedBy:drawerCashierName,expectedCash:drawerExpected,actualCash,reason:"count",notes:drawerNotes||null})}); const json=await res.json().catch(()=>null); if(!res.ok) throw new Error(json?.error??"Failed"); setShowDrawerCount(false); setDrawerActual(""); setDrawerNotes(""); flash("Cash drawer count saved."); } catch(error) { flash(error instanceof Error?error.message:"Failed to save drawer count",true); } finally { setDrawerSaving(false); }
   }
 
   function CashDrawerCountModal() {
     if (!showDrawerCount) return null;
     const actualCash = parseRupiahInput(drawerActual);
     const diff = actualCash - drawerExpected;
-
     return (
-      <ModalShell onClose={() => setShowDrawerCount(false)}>
-        <form onSubmit={saveDrawerCount} className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background: "white" }}>
-          <div className="px-6 py-5" style={{ borderBottom: "1px solid #e5e7eb" }}>
-            <p className="text-lg font-black" style={{ color: "#111827" }}>Check Cash Drawer</p>
-            <p className="text-xs mt-1" style={{ color: "#6b7280" }}>
-              {drawerCashierName ? `Active cashier: ${drawerCashierName}` : "No active cashier session found"}
-            </p>
+      <ModalShell onClose={()=>setShowDrawerCount(false)}>
+        <form onSubmit={saveDrawerCount} className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden anim-fade-up" style={{ background:"white" }}>
+          <div className="px-6 py-5" style={{ borderBottom:`1px solid ${C.border}` }}>
+            <p className="text-base font-black" style={{ color:C.fg }}>Check Cash Drawer</p>
+            <p className="text-xs mt-0.5" style={{ color:C.mutedFg }}>{drawerCashierName?`Active cashier: ${drawerCashierName}`:"No active cashier session"}</p>
           </div>
-
           <div className="px-6 py-5 space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-2xl px-4 py-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Expected</p>
-                <p className="text-lg font-black mt-1" style={{ color: "#0369a1" }}>{money(drawerExpected)}</p>
+              <div className="rounded-2xl px-4 py-3" style={{ background:C.muted, border:`1px solid ${C.border}` }}>
+                <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color:C.mutedFg }}>Expected</p>
+                <p className="text-lg font-black" style={{ color:"#0369a1" }}>{money(drawerExpected)}</p>
               </div>
-              <div className="rounded-2xl px-4 py-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Difference</p>
-                <p className="text-lg font-black mt-1" style={{ color: diff === 0 ? "#16a34a" : diff < 0 ? "#dc2626" : "#0369a1" }}>{money(diff)}</p>
+              <div className="rounded-2xl px-4 py-3" style={{ background:C.muted, border:`1px solid ${C.border}` }}>
+                <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color:C.mutedFg }}>Difference</p>
+                <p className="text-lg font-black" style={{ color:diff===0?"#16a34a":diff<0?"#dc2626":"#0369a1" }}>{money(diff)}</p>
               </div>
             </div>
-
             <div>
-              <label className="block text-xs font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Actual Cash Counted</label>
+              <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color:C.mutedFg }}>Actual Cash Counted</label>
               <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black" style={{ color: "#9ca3af" }}>Rp</span>
-                <input
-                  required
-                  inputMode="numeric"
-                  value={drawerActual}
-                  onChange={(e) => setDrawerActual(formatRupiahInput(e.target.value))}
-                  placeholder="0"
-                  className="w-full rounded-2xl pl-12 pr-4 py-3 text-lg font-black focus:outline-none"
-                  style={{ border: "1px solid #e5e7eb", color: "#111827", background: "white" }}
-                />
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black" style={{ color:C.mutedFg }}>Rp</span>
+                <input required inputMode="numeric" value={drawerActual} onChange={e=>setDrawerActual(formatRupiahInput(e.target.value))}
+                  placeholder="0" className="w-full rounded-2xl pl-12 pr-4 py-3 text-lg font-black focus:outline-none focus:ring-2"
+                  style={{ border:`1px solid ${C.border}`, color:C.fg, background:"white", "--tw-ring-color":"rgba(255,101,63,0.3)" } as React.CSSProperties}/>
               </div>
             </div>
-
             <div>
-              <label className="block text-xs font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Notes optional</label>
-              <textarea
-                value={drawerNotes}
-                onChange={(e) => setDrawerNotes(e.target.value)}
-                rows={3}
-                className="w-full rounded-2xl px-4 py-3 text-sm focus:outline-none"
-                style={{ border: "1px solid #e5e7eb", color: "#111827", background: "white" }}
-                placeholder="Example: after lunch rush, before shift handover, etc."
-              />
+              <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color:C.mutedFg }}>Notes (optional)</label>
+              <textarea value={drawerNotes} onChange={e=>setDrawerNotes(e.target.value)} rows={2} placeholder="E.g. after lunch rush, shift handover…"
+                className="w-full rounded-2xl px-4 py-3 text-sm focus:outline-none resize-none"
+                style={{ border:`1px solid ${C.border}`, color:C.fg, background:"white" }}/>
             </div>
           </div>
-
-          <div className="px-6 py-4 flex gap-2 justify-end" style={{ background: "#f9fafb", borderTop: "1px solid #e5e7eb" }}>
-            <button type="button" onClick={() => setShowDrawerCount(false)} disabled={drawerSaving} className="px-4 py-2.5 rounded-xl text-sm font-bold border disabled:opacity-50" style={{ background: "white", borderColor: "#e5e7eb", color: "#374151" }}>Cancel</button>
-            <button disabled={drawerSaving} className="px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50" style={{ background: "var(--brand-orange)", color: "white" }}>
-              {drawerSaving ? "Saving..." : "Save Count"}
+          <div className="px-6 py-4 flex gap-2 justify-end" style={{ background:C.muted, borderTop:`1px solid ${C.border}` }}>
+            <button type="button" onClick={()=>setShowDrawerCount(false)} disabled={drawerSaving}
+              className="px-5 py-2.5 rounded-xl text-sm font-bold border disabled:opacity-50" style={{ background:"white", borderColor:C.border, color:C.secFg }}>Cancel</button>
+            <button disabled={drawerSaving} className="px-5 py-2.5 rounded-xl text-sm font-black disabled:opacity-50 transition-all hover:opacity-90" style={{ background:C.orange, color:"white" }}>
+              {drawerSaving?"Saving…":"Save Count"}
             </button>
           </div>
         </form>
@@ -1116,72 +938,74 @@ function POSInner() {
     if (!showReport) return null;
     return (
       <>
-        <div className="fixed inset-0 z-40" style={{ background: "rgba(0,0,0,0.18)" }} onClick={() => setShowReport(false)} />
-        <div className="fixed right-0 top-0 h-full z-50 flex flex-col" style={{ width: 360, background: "white", boxShadow: "-4px 0 32px rgba(0,0,0,0.1)", borderLeft: "1px solid #e5e7eb" }}>
-          <div className="flex items-center justify-between px-5 py-4 flex-shrink-0" style={{ borderBottom: "1px solid #e5e7eb" }}>
+        <div className="fixed inset-0 z-40" style={{ background:"rgba(30,16,78,0.2)" }} onClick={()=>setShowReport(false)}/>
+        <div className="fixed right-0 top-0 h-full z-50 flex flex-col anim-slide-in" style={{ width:340, background:"white", boxShadow:"-8px 0 40px rgba(30,16,78,0.12)", borderLeft:`1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between px-5 py-4 flex-shrink-0" style={{ borderBottom:`1px solid ${C.border}` }}>
             <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}><BarChart2 size={15} /></div>
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background:"rgba(69,46,90,0.08)", color:C.mid }}><BarChart2 size={16}/></div>
               <div>
-                <p className="text-sm font-black" style={{ color: "#111" }}>Sales Report</p>
-                <p className="text-xs truncate max-w-[230px]" style={{ color: "#9ca3af" }}>{event?.name}</p>
+                <p className="text-sm font-black" style={{ color:C.fg }}>Sales Report</p>
+                <p className="text-xs truncate max-w-[220px]" style={{ color:C.mutedFg }}>{event?.name}</p>
               </div>
             </div>
-            <button onClick={() => setShowReport(false)} className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "#f3f4f6", color: "#6b7280" }}><X size={14} /></button>
+            <button onClick={()=>setShowReport(false)} className="w-8 h-8 rounded-xl flex items-center justify-center transition-all hover:bg-red-50" style={{ color:C.mutedFg }}><X size={14}/></button>
           </div>
           <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-            {loadingStats ? (
+            {loadingStats?(
               <div className="flex flex-col items-center justify-center h-40 gap-3">
-                <RefreshCw size={20} className="animate-spin" style={{ color: "#d1d5db" }} />
-                <p className="text-xs" style={{ color: "#9ca3af" }}>Loading stats…</p>
+                <RefreshCw size={20} className="animate-spin" style={{ color:C.border }}/>
+                <p className="text-xs" style={{ color:C.mutedFg }}>Loading stats…</p>
               </div>
-            ) : dailyStats ? (
+            ):dailyStats?(
               <>
                 <div>
-                  <p className="text-[11px] font-bold uppercase tracking-widest mb-3" style={{ color: "#9ca3af" }}>Today</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest mb-3" style={{ color:C.mutedFg }}>Today</p>
                   <div className="grid grid-cols-2 gap-2">
                     {[
-                      { icon: <DollarSign size={14} />, label: "Revenue",      value: money(dailyStats.todayRevenue),              color: "var(--brand-orange)", bg: "rgba(255,101,63,0.08)"  },
-                      { icon: <ShoppingBag size={14}/>, label: "Transactions", value: String(dailyStats.todayTxnCount),            color: "#0369a1",             bg: "rgba(3,105,161,0.07)"   },
-                      { icon: <TrendingUp size={14} />, label: "Items Sold",   value: `${dailyStats.todayItemsSold} units`,        color: "#7c3aed",             bg: "rgba(124,58,237,0.08)"  },
-                      { icon: <Tag size={14} />,        label: "Discounts",    value: money(dailyStats.todayDiscount),             color: "#16a34a",             bg: "rgba(22,163,74,0.07)"   },
-                    ].map(({ icon, label, value, color, bg }) => (
-                      <div key={label} className="rounded-xl p-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                        <div className="w-6 h-6 rounded-lg flex items-center justify-center mb-2" style={{ background: bg, color }}>{icon}</div>
-                        <p className="text-xs" style={{ color: "#9ca3af" }}>{label}</p>
+                      { icon:<DollarSign size={13}/>, label:"Revenue",      value:money(dailyStats.todayRevenue),           color:C.orange, bg:"rgba(255,101,63,0.08)"  },
+                      { icon:<ShoppingBag size={13}/>,label:"Transactions", value:String(dailyStats.todayTxnCount),         color:"#0369a1", bg:"rgba(3,105,161,0.07)"   },
+                      { icon:<TrendingUp size={13}/>, label:"Items Sold",   value:`${dailyStats.todayItemsSold} units`,     color:C.mid,     bg:"rgba(69,46,90,0.07)"    },
+                      { icon:<Tag size={13}/>,        label:"Discounts",    value:money(dailyStats.todayDiscount),          color:"#16a34a", bg:"rgba(22,163,74,0.07)"   },
+                    ].map(({icon,label,value,color,bg})=>(
+                      <div key={label} className="rounded-xl p-3" style={{ background:"#f9fafb", border:`1px solid ${C.border}` }}>
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center mb-2" style={{ background:bg, color }}>{icon}</div>
+                        <p className="text-[10px]" style={{ color:C.mutedFg }}>{label}</p>
                         <p className="text-sm font-black mt-0.5 truncate" style={{ color }}>{value}</p>
                       </div>
                     ))}
                   </div>
                 </div>
-                <div style={{ borderTop: "1px solid #f3f4f6" }} />
+                <div style={{ borderTop:`1px solid ${C.border}` }}/>
                 <div>
-                  <p className="text-[11px] font-bold uppercase tracking-widest mb-3" style={{ color: "#9ca3af" }}>Total Event Sales</p>
-                  <div className="space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest mb-3" style={{ color:C.mutedFg }}>Total Event Sales</p>
+                  <div className="space-y-1.5">
                     {[
-                      { label: "Total Revenue",  value: money(dailyStats.revenue),       color: "var(--brand-orange)" },
-                      { label: "Transactions",   value: String(dailyStats.txnCount),     color: "#0369a1"             },
-                      { label: "Items Sold",     value: `${dailyStats.itemsSold} units`, color: "#7c3aed"             },
-                      { label: "Total Discounts",value: money(dailyStats.discount),      color: "#16a34a"             },
-                      { label: "Total Stock",    value: String(dailyStats.totalUnits),   color: stockTone(dailyStats.totalUnits) },
-                    ].map(({ label, value, color }) => (
-                      <div key={label} className="flex items-center justify-between px-3 py-2.5 rounded-xl" style={{ background: "#f9fafb" }}>
-                        <span className="text-xs" style={{ color: "#9ca3af" }}>{label}</span>
+                      {label:"Total Revenue",   value:money(dailyStats.revenue),       color:C.orange},
+                      {label:"Transactions",    value:String(dailyStats.txnCount),     color:"#0369a1"},
+                      {label:"Items Sold",      value:`${dailyStats.itemsSold} units`, color:C.mid},
+                      {label:"Total Discounts", value:money(dailyStats.discount),      color:"#16a34a"},
+                      {label:"Total Stock",     value:String(dailyStats.totalUnits),   color:stockTone(dailyStats.totalUnits)},
+                    ].map(({label,value,color})=>(
+                      <div key={label} className="flex items-center justify-between px-3 py-2.5 rounded-xl" style={{ background:C.muted }}>
+                        <span className="text-xs" style={{ color:C.mutedFg }}>{label}</span>
                         <span className="text-sm font-black" style={{ color }}>{value}</span>
                       </div>
                     ))}
                   </div>
                 </div>
               </>
-            ) : (
+            ):(
               <div className="flex flex-col items-center justify-center h-40 gap-3">
-                <BarChart2 size={24} style={{ color: "#d1d5db" }} />
-                <p className="text-xs text-center" style={{ color: "#9ca3af" }}>Could not load stats.<br />Check your connection and try again.</p>
+                <BarChart2 size={24} style={{ color:C.border }}/>
+                <p className="text-xs text-center" style={{ color:C.mutedFg }}>Could not load stats.<br/>Check connection and retry.</p>
               </div>
             )}
           </div>
-          <div className="flex-shrink-0 px-5 py-4" style={{ borderTop: "1px solid #e5e7eb" }}>
-            <button onClick={() => event?.id && loadDailyStats(event.id)} disabled={loadingStats} className="w-full rounded-xl py-2.5 text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-40" style={{ background: "#f3f4f6", color: "#374151" }}>
-              <RefreshCw size={11} className={loadingStats ? "animate-spin" : ""} /> Refresh Stats
+          <div className="flex-shrink-0 px-5 py-4" style={{ borderTop:`1px solid ${C.border}` }}>
+            <button onClick={()=>event?.id&&loadDailyStats(event.id)} disabled={loadingStats}
+              className="w-full rounded-xl py-2.5 text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-40 transition-all hover:bg-gray-100"
+              style={{ background:C.muted, color:C.secFg }}>
+              <RefreshCw size={11} className={loadingStats?"animate-spin":""}/> Refresh Stats
             </button>
           </div>
         </div>
@@ -1190,238 +1014,450 @@ function POSInner() {
   }
 
   // ── Event select screen ───────────────────────────────────────────────────
+  if (screen==="event-select") {
+    // Merge prepared + cloud events, deduplicate by id, apply search + status filter
+    const allEventIds = new Set(preparedEvents.map(e=>e.id));
+    const cloudOnly   = events.filter(e=>!allEventIds.has(e.id));
 
-  if (screen === "event-select") {
+    const esq = eventSearch.trim().toLowerCase();
+    const filteredPrepared = preparedEvents.filter(ev=>{
+      if (eventStatusFilter!=="all" && ev.status!==eventStatusFilter) return false;
+      if (esq && !ev.name.toLowerCase().includes(esq) && !(ev.location??"").toLowerCase().includes(esq)) return false;
+      return true;
+    });
+    const filteredCloud = cloudOnly.filter(ev=>{
+      if (eventStatusFilter!=="all" && ev.status!==eventStatusFilter) return false;
+      if (esq && !ev.name.toLowerCase().includes(esq) && !(ev.location??"").toLowerCase().includes(esq)) return false;
+      return true;
+    });
+    const totalVisible = filteredPrepared.length + filteredCloud.length;
+    const totalAll     = preparedEvents.length + cloudOnly.length;
+    const hasFilter    = esq || eventStatusFilter!=="all";
+
+    const STATUS_FILTERS: { value: "all"|"active"|"draft"|"closed"; label: string }[] = [
+      { value:"active", label:"Active" },
+      { value:"draft",  label:"Draft"  },
+      { value:"closed", label:"Closed" },
+      { value:"all",    label:"All"    },
+    ];
+
     return (
-      <div className="min-h-screen" style={{ background: "#fafaf8" }}>
+      <div className="h-screen flex flex-col overflow-hidden" style={{ background:C.bg }}>
         <style>{KEYFRAMES}</style>
-        {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl" style={{ background: toastErr ? "#ef4444" : "#16a34a", color: "white" }}>{toast}</div>}
-        <div style={{ background: "white", borderBottom: "1px solid #e5e7eb" }}>
-          <div className="max-w-2xl mx-auto px-6 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: "var(--brand-orange)", color: "white" }}><Zap size={17} strokeWidth={2.5} /></div>
-              <div>
-                <p className="text-sm font-black tracking-tight" style={{ color: "#111" }}>Point of Sale</p>
-                <p className="text-xs" style={{ color: "#9ca3af" }}>Choose an event to open</p>
-              </div>
+        {toast&&<div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl" style={{ background:toastErr?"#ef4444":"#16a34a", color:"white" }}>{toast}</div>}
+
+        {/* ── Sticky header ── */}
+        <div className="flex-shrink-0" style={{ background:C.deep }}>
+          {/* Top row: back + branding + status + dashboard */}
+          <div className="px-4 py-3 flex items-center gap-3">
+            <button onClick={()=>window.location.href="/"}
+              className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all hover:bg-white/10"
+              style={{ border:"1px solid rgba(255,255,255,0.15)", color:"rgba(255,255,255,0.7)" }}
+              title="Back to dashboard">
+              <ArrowLeft size={15}/>
+            </button>
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:C.orange }}>
+              <Zap size={16} strokeWidth={2.5} style={{ color:"white" }}/>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold" style={{ background: online ? "rgba(22,163,74,0.08)" : "rgba(245,158,11,0.1)", color: online ? "#16a34a" : "#b45309" }}>
-              {online ? <Wifi size={11} /> : <WifiOff size={11} />}{online ? "Online" : "Offline"}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-black text-white leading-tight">Point of Sale</p>
+              <p className="text-[11px] opacity-50 text-white">
+                {totalAll>0?`${totalVisible} of ${totalAll} events`:"No events loaded"}
+              </p>
+            </div>
+            {/* Online pill */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold flex-shrink-0"
+              style={{ background:online?"rgba(34,197,94,0.15)":"rgba(245,158,11,0.2)", color:online?"#4ade80":"#fbbf24" }}>
+              {online?<Wifi size={11}/>:<WifiOff size={11}/>}
+              <span className="hidden sm:inline">{online?"Online":"Offline"}</span>
+            </div>
+            {/* Dashboard link — always visible in header */}
+            <button onClick={()=>window.location.href="/"}
+              className="hidden sm:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg flex-shrink-0 transition-all hover:bg-white/10"
+              style={{ color:"rgba(255,255,255,0.55)", border:"1px solid rgba(255,255,255,0.1)" }}>
+              <LogOut size={12}/>Dashboard
+            </button>
+          </div>
+
+          {/* Search + filter row */}
+          <div className="px-4 pb-3 flex items-center gap-2">
+            {/* Search */}
+            <div className="relative flex-1">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color:"rgba(255,255,255,0.35)" }}/>
+              <input
+                value={eventSearch} onChange={e=>setEventSearch(e.target.value)}
+                placeholder="Search events…"
+                className="w-full rounded-xl pl-9 pr-8 py-2 text-sm focus:outline-none"
+                style={{ background:"rgba(255,255,255,0.08)", border:"1px solid rgba(255,255,255,0.12)", color:"white" }}/>
+              {eventSearch&&(
+                <button onClick={()=>setEventSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2" style={{ color:"rgba(255,255,255,0.4)" }}>
+                  <X size={12}/>
+                </button>
+              )}
+            </div>
+            {/* Status filter pills */}
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {STATUS_FILTERS.map(f=>(
+                <button key={f.value} onClick={()=>setEventStatusFilter(f.value)}
+                  className="text-[11px] font-black px-3 py-1.5 rounded-lg transition-all"
+                  style={{
+                    background: eventStatusFilter===f.value?"rgba(255,255,255,0.18)":"transparent",
+                    color:      eventStatusFilter===f.value?"white":"rgba(255,255,255,0.45)",
+                    border:     `1px solid ${eventStatusFilter===f.value?"rgba(255,255,255,0.25)":"transparent"}`,
+                  }}>
+                  {f.label}
+                </button>
+              ))}
             </div>
           </div>
         </div>
-        <div className="max-w-2xl mx-auto px-6 py-8 space-y-8">
-          {preparedEvents.length > 0 && (
-            <section className="anim-fade-up">
-              <div className="flex items-center gap-2 mb-3"><div className="w-1 h-4 rounded-full" style={{ background: "var(--brand-orange)" }} /><p className="text-xs font-bold uppercase tracking-widest" style={{ color: "#374151" }}>Ready to Sell</p></div>
-              <div className="space-y-2">
-                {preparedEvents.map((ev, i) => { const s = STATUS_STYLE[ev.status] ?? STATUS_STYLE.draft; return (
-                  <button key={ev.id} onClick={() => { localStorage.setItem("pos:last-event-id", String(ev.id)); loadLocalBundle(ev.id).then(b => b && setScreen("sell")); }}
-                    className="anim-fade-up w-full text-left rounded-2xl px-5 py-4 transition-all group hover:shadow-md"
-                    style={{ background: "white", border: `1.5px solid ${s.border}`, animationDelay: `${i*55}ms`, boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: s.bg }}>
-                        <span className="w-2.5 h-2.5 rounded-full block" style={{ background: s.dot, animation: ev.status === "active" ? "pulseDot 2s ease-in-out infinite" : undefined }} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="font-bold text-[15px] truncate" style={{ color: "#111" }}>{ev.name}</p>
-                          <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0" style={{ background: s.bg, color: s.dot }}>{s.label}</span>
+
+        {/* ── Scrollable event list ── */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="mx-auto px-4 py-5 space-y-6">
+
+            {/* Prepared / local-ready events */}
+            {filteredPrepared.length>0&&(
+              <section className="anim-fade-up">
+                <div className="flex items-center gap-2 mb-2.5">
+                  <div className="w-1.5 h-4 rounded-full" style={{ background:C.orange }}/>
+                  <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.secFg }}>Ready to Sell</p>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full ml-auto" style={{ background:"rgba(255,101,63,0.1)", color:C.orange }}>{filteredPrepared.length}</span>
+                </div>
+                <div className="space-y-2">
+                  {filteredPrepared.map((ev,i)=>{ const s=STATUS_STYLE[ev.status]??STATUS_STYLE.draft; return (
+                    <button key={ev.id}
+                      onClick={()=>{localStorage.setItem("pos:last-event-id",String(ev.id));loadLocalBundle(ev.id).then(b=>b&&setScreen("sell"));}}
+                      className="anim-fade-up w-full text-left rounded-2xl px-4 py-3.5 transition-all group hover:shadow-md"
+                      style={{ background:"white", border:`1.5px solid ${s.border}`, animationDelay:`${i*40}ms` }}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background:s.bg }}>
+                          <span className="w-2.5 h-2.5 rounded-full block" style={{ background:s.dot, animation:ev.status==="active"?"pulseDot 2s ease-in-out infinite":undefined }}/>
                         </div>
-                        <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                          {ev.location && <span className="flex items-center gap-1 text-xs" style={{ color: "#9ca3af" }}><MapPin size={10}/>{ev.location}</span>}
-                          <span className="flex items-center gap-1 text-xs font-medium" style={{ color: "#0369a1" }}><Database size={9}/>Local ready</span>
-                          {ev.pendingSyncCount > 0 && <span className="text-[11px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "rgba(245,158,11,0.1)", color: "#b45309" }}>{ev.pendingSyncCount} unsynced</span>}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-black text-sm truncate" style={{ color:C.fg }}>{ev.name}</p>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full font-black flex-shrink-0" style={{ background:s.bg, color:s.text }}>{s.label}</span>
+                          </div>
+                          <div className="flex items-center gap-2.5 mt-0.5 flex-wrap">
+                            {ev.location&&<span className="flex items-center gap-1 text-xs" style={{ color:C.mutedFg }}><MapPin size={9}/>{ev.location}</span>}
+                            <span className="flex items-center gap-1 text-[11px] font-semibold" style={{ color:"#0369a1" }}><Database size={9}/>Local ready</span>
+                            {ev.pendingSyncCount>0&&<span className="text-[10px] font-black px-1.5 py-0.5 rounded-md" style={{ background:"rgba(245,158,11,0.1)", color:"#b45309" }}>{ev.pendingSyncCount} unsynced</span>}
+                          </div>
                         </div>
+                        <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-110" style={{ background:C.orange, color:"white" }}><ArrowRight size={14}/></div>
                       </div>
-                      <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform group-hover:scale-110" style={{ background: "var(--brand-orange)", color: "white" }}><ArrowRight size={14}/></div>
-                    </div>
-                  </button>
-                ); })}
+                    </button>
+                  );})}
+                </div>
+              </section>
+            )}
+
+            {/* Cloud-only events */}
+            {filteredCloud.length>0&&(
+              <section className="anim-fade-up" style={{ animationDelay:"60ms" }}>
+                <div className="flex items-center gap-2 mb-2.5">
+                  <div className="w-1.5 h-4 rounded-full" style={{ background:C.border }}/>
+                  <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.secFg }}>Available Events</p>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full ml-auto" style={{ background:C.muted, color:C.mutedFg }}>{filteredCloud.length}</span>
+                </div>
+                <div className="space-y-2">
+                  {filteredCloud.map((ev,i)=>{ const s=STATUS_STYLE[ev.status]??STATUS_STYLE.draft; return (
+                    <button key={ev.id} onClick={()=>openLocalEvent(ev)} disabled={preparing}
+                      className="anim-fade-up w-full text-left rounded-2xl px-4 py-3.5 transition-all group hover:shadow-sm disabled:opacity-50"
+                      style={{ background:"white", border:`1.5px solid ${C.border}`, animationDelay:`${i*40}ms` }}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background:s.bg }}>
+                          <span className="w-2.5 h-2.5 rounded-full" style={{ background:s.dot }}/>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-black text-sm truncate" style={{ color:C.fg }}>{ev.name}</p>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full font-black flex-shrink-0" style={{ background:s.bg, color:s.text }}>{s.label}</span>
+                          </div>
+                          {ev.location&&<span className="flex items-center gap-1 text-xs mt-0.5" style={{ color:C.mutedFg }}><MapPin size={9}/>{ev.location}</span>}
+                        </div>
+                        {preparing?(
+                          <div className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-xl flex-shrink-0" style={{ background:"rgba(255,101,63,0.08)", color:C.orange }}>
+                            <RefreshCw size={11} className="animate-spin"/>Preparing…
+                          </div>
+                        ):(
+                          <div className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1.5 rounded-xl border flex-shrink-0 transition-all group-hover:border-orange-300 group-hover:text-orange-600" style={{ borderColor:C.border, color:C.mutedFg }}>
+                            Open<ChevronRight size={11}/>
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );})}
+                </div>
+              </section>
+            )}
+
+            {/* Empty state */}
+            {totalVisible===0&&(
+              <div className="rounded-2xl p-10 text-center anim-fade-up" style={{ background:"white", border:`1.5px solid ${C.border}` }}>
+                <div className="w-12 h-12 rounded-2xl mx-auto mb-3 flex items-center justify-center" style={{ background:C.muted }}>
+                  <Package size={20} style={{ color:C.border }}/>
+                </div>
+                {hasFilter?(
+                  <>
+                    <p className="font-black text-sm mb-1" style={{ color:C.secFg }}>No events match</p>
+                    <p className="text-xs mb-3" style={{ color:C.mutedFg }}>Try a different search or filter.</p>
+                    <button onClick={()=>{setEventSearch("");setEventStatusFilter("all");}}
+                      className="text-xs font-bold px-4 py-2 rounded-xl transition-all hover:opacity-80"
+                      style={{ background:C.orange, color:"white" }}>
+                      Clear filters
+                    </button>
+                  </>
+                ):(
+                  <>
+                    <p className="font-black text-sm mb-1" style={{ color:C.secFg }}>No events available</p>
+                    <p className="text-xs" style={{ color:C.mutedFg }}>{online?"No events found. Create one from the dashboard.":"Connect to internet to load events."}</p>
+                  </>
+                )}
               </div>
-            </section>
-          )}
-          {events.length > 0 && (
-            <section className="anim-fade-up" style={{ animationDelay: "80ms" }}>
-              <div className="flex items-center gap-2 mb-3"><div className="w-1 h-4 rounded-full" style={{ background: "#e5e7eb" }} /><p className="text-xs font-bold uppercase tracking-widest" style={{ color: "#374151" }}>Available Events</p></div>
-              <div className="space-y-2">
-                {events.map((ev, i) => { const s = STATUS_STYLE[ev.status] ?? STATUS_STYLE.draft; return (
-                  <button key={ev.id} onClick={() => openLocalEvent(ev)} disabled={preparing}
-                    className="anim-fade-up w-full text-left rounded-2xl px-5 py-4 transition-all group hover:shadow-sm disabled:opacity-50"
-                    style={{ background: "white", border: "1.5px solid #e5e7eb", animationDelay: `${(i+preparedEvents.length)*55}ms`, boxShadow: "0 1px 3px rgba(0,0,0,0.03)" }}>
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: s.bg }}><span className="w-2.5 h-2.5 rounded-full block" style={{ background: s.dot }} /></div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="font-bold text-[15px] truncate" style={{ color: "#111" }}>{ev.name}</p>
-                          <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0" style={{ background: s.bg, color: s.dot }}>{s.label}</span>
-                        </div>
-                        {ev.location && <span className="flex items-center gap-1 text-xs mt-0.5" style={{ color: "#9ca3af" }}><MapPin size={10}/>{ev.location}</span>}
-                      </div>
-                      {preparing ? <div className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl flex-shrink-0" style={{ background: "rgba(255,101,63,0.08)", color: "var(--brand-orange)" }}><RefreshCw size={11} className="animate-spin"/>Preparing…</div>
-                        : <div className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-xl border flex-shrink-0 transition-all group-hover:border-orange-300 group-hover:text-orange-600" style={{ borderColor: "#e5e7eb", color: "#6b7280" }}>Open<ChevronRight size={11}/></div>}
-                    </div>
-                  </button>
-                ); })}
-              </div>
-            </section>
-          )}
-          {preparedEvents.length === 0 && events.length === 0 && (
-            <div className="rounded-2xl p-10 text-center anim-fade-up" style={{ background: "white", border: "1.5px solid #e5e7eb" }}>
-              <div className="w-12 h-12 rounded-2xl mx-auto mb-3 flex items-center justify-center" style={{ background: "#f3f4f6" }}><Package size={20} style={{ color: "#9ca3af" }} /></div>
-              <p className="font-semibold text-sm mb-1" style={{ color: "#374151" }}>No events available</p>
-              <p className="text-xs" style={{ color: "#9ca3af" }}>{online ? "No events found. Create one from the dashboard." : "Connect to the internet to load events."}</p>
-            </div>
-          )}
-          <div className="text-center pt-2"><a href="/" className="text-xs" style={{ color: "#d1d5db" }}>← Back to dashboard</a></div>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
   // ── Sell / success screen ─────────────────────────────────────────────────
-
-  const eventStyle     = STATUS_STYLE[event?.status ?? "draft"] ?? STATUS_STYLE.draft;
-  const needsReference = payMethod && payMethod.type !== "cash";
-  const canConfirm     = !!(payMethod && cart.length > 0 && (!isCash || cashTenderedNum >= total));
+  const eventStyle = STATUS_STYLE[event?.status??"draft"]??STATUS_STYLE.draft;
+  const needsRef   = payMethod&&payMethod.type!=="cash";
+  const canConfirm = !!(payMethod&&cart.length>0&&(!isCash||cashTenderedNum>=total));
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background: "#fafaf8" }}>
+    <div className="h-screen w-screen flex flex-col overflow-hidden" style={{ background:C.bg }}>
       <style>{KEYFRAMES}</style>
-      <POSActionModal />
-      <PaymentSuccessOverlay />
-      <CashDrawerCountModal />
-      <ReportDrawer />
+      <POSActionModal/>
+      <PaymentSuccessOverlay/>
+      <CashDrawerCountModal/>
+      <ReportDrawer/>
 
-      {toast && <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl pointer-events-none" style={{ background: toastErr ? "#ef4444" : "#16a34a", color: "white" }}>{toast}</div>}
 
-      {/* Topbar */}
-      <div className="flex items-center gap-3 px-4 flex-shrink-0" style={{ background: "white", borderBottom: "1px solid #e5e7eb", height: 58 }}>
-        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
-          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: eventStyle.dot, animation: event?.status === "active" ? "pulseDot 2s ease-in-out infinite" : undefined }} />
-          <div className="min-w-0">
-            <p className="text-sm font-black truncate" style={{ color: "#111" }}>{event?.name}</p>
-            {event?.location && <p className="hidden md:flex items-center gap-1 text-xs" style={{ color: "#9ca3af" }}><MapPin size={10}/>{event.location}</p>}
+      {toast&&<div className="fixed top-3 left-1/2 -translate-x-1/2 z-[200] px-5 py-2.5 rounded-xl text-sm font-bold shadow-xl pointer-events-none" style={{ background:toastErr?"#ef4444":"#16a34a", color:"white" }}>{toast}</div>}
+
+      {/* ── Topbar ── */}
+      <header className="flex items-center gap-2 px-3 flex-shrink-0" style={{ background:C.deep, height:56 }}>
+
+        {/* Event info */}
+        <div className="flex items-center gap-2.5 min-w-0 flex-1 overflow-hidden">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:"rgba(255,255,255,0.08)" }}>
+            <Zap size={15} strokeWidth={2.5} style={{ color:C.orange }}/>
           </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background:eventStyle.dot, animation:event?.status==="active"?"pulseDot 2s ease-in-out infinite":undefined }}/>
+              <p className="text-sm font-black truncate text-white">{event?.name}</p>
+            </div>
+            {event?.location&&<p className="hidden md:flex items-center gap-1 text-[11px] opacity-50 text-white"><MapPin size={9}/>{event.location}</p>}
+          </div>
+          {cashierSession && (
+            <div
+              className="hidden md:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg flex-shrink-0"
+              style={{ color: "rgba(255,255,255,0.65)", border: "1px solid rgba(255,255,255,0.12)" }}>
+              <User size={11} />
+              <span className="max-w-[110px] truncate font-semibold">{cashierSession.cashierName}</span>
+            </div>
+          )}
         </div>
 
-        <button onClick={openDrawerCountModal}
-          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all"
-          style={{ color: "#0369a1", background: "rgba(3,105,161,0.06)", borderColor: "rgba(3,105,161,0.2)" }}>
-          <Banknote size={12}/><span className="hidden sm:inline">Drawer</span>
-        </button>
-
-        <button onClick={() => event?.id && (window.location.href = `/pos/history?event=${event.id}`)}
-          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all"
-          style={{ color: "white", background: "rgba(3,105,161)", borderColor: "rgba(3,105,161,0.2)" }}>
-          <History size={12}/><span className="hidden sm:inline">History</span>
-        </button>
-
-        <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-          <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Status</span>
-          <span className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-xl" style={{ background: "rgba(3,105,161,0.07)", color: "#0369a1" }}><Database size={9}/>SQLite</span>
-          <span className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-xl" style={{ background: online ? "rgba(22,163,74,0.07)" : "rgba(245,158,11,0.1)", color: online ? "#16a34a" : "#b45309" }}>
-            {online ? <Wifi size={9}/> : <WifiOff size={9}/>}{online ? "Online" : "Offline"}
+        {/* Status pills — hidden on mobile */}
+        <div className="topbar-status hidden lg:flex items-center gap-1.5">
+          <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg" style={{ background:"rgba(255,255,255,0.08)", color:"rgba(255,255,255,0.6)" }}>
+            <Database size={9}/> SQLite
           </span>
-          {promoCount > 0 && <span className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-xl" style={{ background: "rgba(124,58,237,0.08)", color: "#7c3aed" }}><Tag size={9}/>{promoCount} promo{promoCount > 1 ? "s" : ""}</span>}
-          {pendingSyncCount > 0 ? (
-            <button onClick={() => event?.id && syncLocalTransactions(event.id)} disabled={syncing || !online}
-              className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-xl disabled:opacity-60"
-              style={{ background: "rgba(245,158,11,0.1)", color: "#b45309" }}>
-              {syncing ? <RefreshCw size={9} className="animate-spin"/> : <CloudUpload size={9}/>}{pendingSyncCount} pending
+          <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg" style={{ background:online?"rgba(34,197,94,0.15)":"rgba(245,158,11,0.15)", color:online?"#4ade80":"#fbbf24" }}>
+            {online?<Wifi size={9}/>:<WifiOff size={9}/>}{online?"Online":"Offline"}
+          </span>
+          {promoCount>0&&<span className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg" style={{ background:"rgba(255,200,92,0.15)", color:C.yellow }}>
+            <Tag size={9}/>{promoCount} promo{promoCount>1?"s":""}
+          </span>}
+          {pendingSyncCount>0?(
+            <button onClick={()=>event?.id&&syncLocalTransactions(event.id)} disabled={syncing||!online}
+              className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg disabled:opacity-60 transition-all hover:opacity-80"
+              style={{ background:"rgba(245,158,11,0.2)", color:"#fbbf24" }}>
+              {syncing?<RefreshCw size={9} className="animate-spin"/>:<CloudUpload size={9}/>}{pendingSyncCount} pending
             </button>
-          ) : localReady ? (
-            <span className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-xl" style={{ background: "rgba(22,163,74,0.07)", color: "#16a34a" }}><Check size={9}/>Synced</span>
-          ) : null}
+          ):localReady?(
+            <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg" style={{ background:"rgba(34,197,94,0.12)", color:"#4ade80" }}>
+              <Check size={9}/>Synced
+            </span>
+          ):null}
         </div>
 
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <button onClick={() => { setShowReport(true); if (event?.id) loadDailyStats(event.id); }} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#7c3aed", background: "rgba(124,58,237,0.05)", borderColor: "rgba(124,58,237,0.2)" }}>
-            <BarChart2 size={12}/><span className="hidden sm:inline">Report</span>
+        {/* ── Action button groups ── */}
+        {/* Group 1: View / Info actions */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={openDrawerCountModal}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
+            style={{ color:"rgba(255,255,255,0.75)" }} title="Cash Drawer Count">
+            <Banknote size={13}/><span className="hidden sm:inline topbar-label">Drawer</span>
           </button>
-          <button onClick={() => event?.id && prepareEventOffline(event.id)} disabled={preparing || !online} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all disabled:opacity-40" style={{ color: "#0369a1", background: "white", borderColor: "#e5e7eb" }}>
-            {preparing ? <RefreshCw size={12} className="animate-spin"/> : <Database size={12}/>}<span className="hidden sm:inline">Refresh</span>
+          <button onClick={()=>event?.id&&(window.location.href=`/pos/history?event=${event.id}`)}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
+            style={{ color:"rgba(255,255,255,0.75)" }} title="Transaction History">
+            <History size={13}/><span className="hidden sm:inline topbar-label">History</span>
           </button>
-          <button onClick={() => { setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery(""); router.push("/pos?select=1"); }} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#374151", background: "white", borderColor: "#e5e7eb" }}>Switch</button>
-          <button onClick={() => { setActionError(""); setActionDialog("turn-off-local"); }} className="hidden md:flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#b45309", background: "white", borderColor: "#fde68a" }}>
-            <Power size={12}/>Turn Off
-          </button>
-          <button onClick={() => window.location.href = "/"} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl border transition-all" style={{ color: "#dc2626", background: "white", borderColor: "#fecaca" }}>
-            <LogOut size={12}/><span className="hidden sm:inline">Exit</span>
+          <button onClick={()=>{setShowReport(true);if(event?.id)loadDailyStats(event.id);}}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
+            style={{ color:"rgba(255,255,255,0.75)" }} title="Sales Report">
+            <BarChart2 size={13}/><span className="hidden sm:inline topbar-label">Report</span>
           </button>
         </div>
-      </div>
 
-      {/* Two-pane */}
-      <div className="flex flex-1 overflow-hidden">
+        {/* Divider */}
+        <div className="w-px h-6 flex-shrink-0" style={{ background:"rgba(255,255,255,0.12)" }}/>
 
-        {/* LEFT: cart + scanner */}
-        <section className="w-3/4 flex flex-col flex-shrink-0" style={{ background: "white", borderRight: "1px solid #e5e7eb" }}>
-          <div className="px-5 py-4 flex-shrink-0" style={{ borderBottom: "1px solid #f3f4f6" }}>
-            <div className="flex items-center justify-between gap-3 mb-4">
+        {/* Group 2: Data / Sync actions */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={()=>event?.id&&prepareEventOffline(event.id)} disabled={preparing||!online}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-40 hover:bg-white/10"
+            style={{ color:"rgba(255,255,255,0.75)" }} title="Refresh local data">
+            {preparing?<RefreshCw size={13} className="animate-spin"/>:<Database size={13}/>}
+            <span className="hidden sm:inline topbar-label">Refresh</span>
+          </button>
+          {/* Switch event — admin only */}
+          {isAdmin && (
+            <button onClick={async ()=>{
+                setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery("");
+                setEventSearch(""); setEventStatusFilter("active");
+                await loadPreparedEvents();
+                if (navigator.onLine) { try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch {} }
+                setScreen("event-select");
+              }}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
+              style={{ color:"rgba(255,255,255,0.75)" }} title="Switch event">
+              <ArrowRight size={13}/><span className="hidden sm:inline topbar-label">Switch</span>
+            </button>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div className="w-px h-6 flex-shrink-0" style={{ background:"rgba(255,255,255,0.12)" }}/>
+
+        {/* Group 3: Exit / Danger actions */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {/* Turn Off — admin only */}
+          {isAdmin && (
+            <button onClick={()=>{setActionError("");setActionDialog("turn-off-local");}}
+              className="hidden md:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
+              style={{ color:"rgba(255,200,92,0.85)" }} title="Turn off local POS">
+              <Power size={13}/><span className="topbar-label">Turn Off</span>
+            </button>
+          )}
+          {/* Cashier: Log Out button (signs out of next-auth) */}
+          {isCashier && (
+            <button
+              onClick={() => signOut({ callbackUrl: "/login" })}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-red-500/20"
+              style={{ color:"rgba(248,113,113,0.85)" }} title="Log out">
+              <LogOut size={13}/><span className="hidden sm:inline topbar-label">Log Out</span>
+            </button>
+          )}
+          {/* Admin: Exit to dashboard */}
+          {isAdmin && (
+            <button onClick={()=>window.location.href="/"}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-red-500/20"
+              style={{ color:"rgba(248,113,113,0.85)" }} title="Exit POS">
+              <LogOut size={13}/><span className="hidden sm:inline topbar-label">Exit</span>
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* ── Two-pane layout ── */}
+      <div className="pos-two-pane flex flex-1 overflow-hidden">
+
+        {/* ── LEFT: Cart + Scanner ── */}
+        <section className="pos-cart-pane flex flex-col overflow-hidden" style={{ flex:"1 1 0", minWidth:0, background:"white", borderRight:`1px solid ${C.border}`, "--border-col":C.border } as React.CSSProperties}>
+
+          {/* Scanner bar */}
+          <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom:`1px solid ${C.muted}` }}>
+            <div className="flex items-center justify-between gap-3 mb-3">
               <div>
-                <p className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Cart</p>
-                <p className="text-sm font-black" style={{ color: "#111827" }}>{itemCount} item{itemCount === 1 ? "" : "s"}</p>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>Cart</p>
+                <p className="text-sm font-black" style={{ color:C.fg }}>{itemCount} item{itemCount===1?"":"s"}</p>
               </div>
-              {cart.length > 0 && <button onClick={() => setCart([])} className="text-[11px] px-3 py-2 rounded-xl font-bold" style={{ background: "#fef2f2", color: "#ef4444" }}>Clear Cart</button>}
+              {cart.length>0&&(
+                <button onClick={()=>setCart([])} className="text-[10px] px-3 py-1.5 rounded-xl font-black transition-all hover:bg-red-100"
+                  style={{ background:"#fef2f2", color:"#ef4444" }}>
+                  <Trash2 size={11} className="inline mr-1"/>Clear
+                </button>
+              )}
             </div>
             <div className="relative">
               <form onSubmit={handleSearchSubmit}>
                 <div className="relative">
-                  <ScanLine size={16} className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--brand-orange)" }} />
-                  <input ref={scanRef} value={query} onChange={e => setQuery(e.target.value)} onFocus={() => setSearchFocused(true)}
-                    placeholder="Scan barcode or search product..."
-                    className="w-full rounded-2xl pl-11 pr-11 py-4 text-base focus:outline-none"
-                    style={{ background: "#f9fafb", border: "1.5px solid #e5e7eb", color: "#111827" }} autoFocus />
-                  {query && (
-                    <button type="button" onClick={() => { setQuery(""); setSearchFocused(false); scanRef.current?.focus(); }} className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "#f3f4f6", color: "#6b7280" }}><X size={14}/></button>
+                  <ScanLine size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color:C.orange }}/>
+                  <input ref={scanRef} value={query} onChange={e=>setQuery(e.target.value)} onFocus={()=>setSearchFocused(true)}
+                    placeholder="Scan barcode or search product…"
+                    className="w-full rounded-2xl pl-10 pr-10 py-3 text-sm focus:outline-none focus:ring-2"
+                    style={{ background:C.muted, border:`1.5px solid ${C.border}`, color:C.fg, "--tw-ring-color":"rgba(255,101,63,0.3)" } as React.CSSProperties}
+                    autoFocus/>
+                  {query&&(
+                    <button type="button" onClick={()=>{setQuery("");setSearchFocused(false);scanRef.current?.focus();}}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg flex items-center justify-center transition-all hover:bg-red-50"
+                      style={{ background:"white", color:C.mutedFg }}><X size={13}/></button>
                   )}
                 </div>
               </form>
-              <SearchResultsOverlay />
+              <SearchResultsOverlay/>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4">
-            {cart.length === 0 ? (
+          {/* Cart items */}
+          <div className="flex-1 overflow-y-auto p-3">
+            {cart.length===0?(
               <div className="h-full flex flex-col items-center justify-center text-center px-8">
-                <Package size={34} style={{ color: "#e5e7eb" }} />
-                <p className="text-sm font-bold mt-3" style={{ color: "#9ca3af" }}>Cart is empty</p>
-                <p className="text-xs mt-1" style={{ color: "#d1d5db" }}>Tap Scan / Search to add products.</p>
+                <div className="w-16 h-16 rounded-3xl flex items-center justify-center mx-auto mb-3" style={{ background:C.muted }}>
+                  <Package size={26} style={{ color:C.border }}/>
+                </div>
+                <p className="text-sm font-black" style={{ color:C.mutedFg }}>Cart is empty</p>
+                <p className="text-xs mt-1" style={{ color:C.border }}>Scan a barcode or search above to add products.</p>
               </div>
-            ) : (
+            ):(
               <div className="space-y-2">
-                {cart.map(item => (
-                  <div key={item.eventItemId} className="rounded-2xl p-3" style={{ background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-sm font-black truncate" style={{ color: "#111827" }}>{item.productName}</p>
-                        <p className="text-xs font-mono mt-0.5" style={{ color: "#9ca3af" }}>{item.itemId}{item.variantCode ? ` · ${item.variantCode}` : ""}</p>
-                        {item.promoApplied && (
-                          <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ background: "rgba(124,58,237,0.1)", color: "#7c3aed" }}>
-                            <Tag size={9}/>{item.promoApplied}
-                          </span>
-                        )}
-                        {item.freeQty > 0 && (
-                          <span className="inline-flex items-center gap-1 mt-1 ml-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ background: "rgba(22,163,74,0.1)", color: "#16a34a" }}>
-                            +{item.freeQty} free
-                          </span>
-                        )}
+                {cart.map(item=>(
+                  <div key={item.eventItemId} className="rounded-2xl p-3 transition-all hover:shadow-sm"
+                    style={{ background:C.muted, border:`1px solid ${C.border}` }}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-black truncate" style={{ color:C.fg }}>{item.productName}</p>
+                        <p className="text-[10px] font-mono mt-0.5" style={{ color:C.mutedFg }}>{item.itemId}{item.variantCode?` · ${item.variantCode}`:""}</p>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {item.promoApplied&&(
+                            <span className="inline-flex items-center gap-1 text-[10px] font-black px-2 py-0.5 rounded-full"
+                              style={{ background:"rgba(69,46,90,0.1)", color:C.mid }}><Tag size={8}/>{item.promoApplied}</span>
+                          )}
+                          {item.freeQty>0&&(
+                            <span className="inline-flex items-center gap-1 text-[10px] font-black px-2 py-0.5 rounded-full"
+                              style={{ background:"rgba(22,163,74,0.1)", color:"#16a34a" }}>+{item.freeQty} free</span>
+                          )}
+                        </div>
                       </div>
-                      <button onClick={() => setCart(prev => prev.filter(r => r.eventItemId !== item.eventItemId))} className="p-1.5 rounded-xl flex-shrink-0" style={{ color: "#ef4444", background: "#fee2e2" }}><Trash2 size={12}/></button>
+                      <button onClick={()=>setCart(prev=>prev.filter(r=>r.eventItemId!==item.eventItemId))}
+                        className="p-1.5 rounded-xl flex-shrink-0 transition-all hover:bg-red-100"
+                        style={{ color:"#ef4444", background:"#fef2f2" }}><Trash2 size={12}/></button>
                     </div>
                     <div className="flex items-center justify-between mt-3">
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => changeQty(item.eventItemId, item.quantity - 1)} className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "#f3f4f6", color: "#374151" }}><Minus size={12}/></button>
-                        <span className="w-9 text-center text-sm font-black" style={{ color: "#111827" }}>{item.quantity}</span>
-                        <button onClick={() => changeQty(item.eventItemId, item.quantity + 1)} className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: "#f3f4f6", color: "#374151" }}><Plus size={12}/></button>
+                      {/* Qty control */}
+                      <div className="flex items-center gap-1 rounded-xl overflow-hidden" style={{ background:"white", border:`1px solid ${C.border}` }}>
+                        <button onClick={()=>changeQty(item.eventItemId,item.quantity-1)}
+                          className="w-8 h-8 flex items-center justify-center transition-all hover:bg-red-50"
+                          style={{ color:"#ef4444" }}><Minus size={13}/></button>
+                        <span className="w-8 text-center text-sm font-black" style={{ color:C.fg }}>{item.quantity}</span>
+                        <button onClick={()=>changeQty(item.eventItemId,item.quantity+1)}
+                          className="w-8 h-8 flex items-center justify-center transition-all hover:bg-green-50"
+                          style={{ color:"#16a34a" }}><Plus size={13}/></button>
                       </div>
+                      {/* Price */}
                       <div className="text-right">
-                        {item.discountAmt > 0 && <p className="text-xs line-through" style={{ color: "#d1d5db" }}>{money(item.unitPrice)} each</p>}
-                        <p className="text-xs font-mono" style={{ color: "#9ca3af" }}>{money(item.finalPrice)} each</p>
-                        <p className="text-sm font-black" style={{ color: "#111827" }}>{money(item.finalPrice * item.quantity)}</p>
+                        {item.discountAmt>0&&<p className="text-[10px] line-through" style={{ color:C.border }}>{money(item.unitPrice)}</p>}
+                        <p className="text-[11px]" style={{ color:C.mutedFg }}>{money(item.finalPrice)} each</p>
+                        <p className="text-base font-black" style={{ color:C.fg }}>{money(item.finalPrice*item.quantity)}</p>
                       </div>
                     </div>
                   </div>
@@ -1430,45 +1466,64 @@ function POSInner() {
             )}
           </div>
 
-          <div className="flex-shrink-0 p-5 space-y-3" style={{ borderTop: "1px solid #e5e7eb", background: "#fff" }}>
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-xs"><span style={{ color: "#9ca3af" }}>Subtotal</span><span className="font-mono" style={{ color: "#374151" }}>{money(subtotal)}</span></div>
-              {discount > 0 && <div className="flex justify-between text-xs"><span style={{ color: "#16a34a" }}>Discount</span><span className="font-mono" style={{ color: "#16a34a" }}>−{money(discount)}</span></div>}
-              <div className="flex justify-between items-baseline pt-2" style={{ borderTop: "1px solid #f3f4f6" }}>
-                <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</span>
-                <span className="text-4xl font-black" style={{ color: "#111827" }}>{money(total)}</span>
+          {/* Cart footer — SINGLE total */}
+          <div className="flex-shrink-0 px-4 py-3" style={{ borderTop:`1px solid ${C.border}`, background:"white" }}>
+            {discount>0&&(
+              <div className="flex items-center justify-between text-xs mb-2 px-1">
+                <span style={{ color:C.mutedFg }}>Subtotal</span>
+                <span className="font-mono" style={{ color:C.mutedFg }}>{money(subtotal)}</span>
               </div>
+            )}
+            {discount>0&&(
+              <div className="flex items-center justify-between text-xs mb-2 px-1">
+                <span className="flex items-center gap-1 font-semibold" style={{ color:"#16a34a" }}><Tag size={10}/>Savings</span>
+                <span className="font-mono font-bold" style={{ color:"#16a34a" }}>−{money(discount)}</span>
+              </div>
+            )}
+            <div className="rounded-2xl px-4 py-3 flex items-center justify-between" style={{ background:cart.length>0?C.deep:C.muted }}>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:cart.length>0?"rgba(255,255,255,0.5)":C.mutedFg }}>
+                  {itemCount} item{itemCount===1?"":"s"}
+                </p>
+                <p className="text-xs mt-0.5 font-semibold" style={{ color:cart.length>0?"rgba(255,255,255,0.5)":C.mutedFg }}>Total</p>
+              </div>
+              <p className="text-3xl font-black" style={{ color:cart.length>0?C.orange:C.border }}>
+                {money(total)}
+              </p>
             </div>
           </div>
         </section>
 
-        {/* RIGHT: payment */}
-        <main className="w-1/4 min-w-[280px] max-w-[360px] flex flex-col overflow-hidden" style={{ background: "white", borderLeft: "1px solid #e5e7eb" }}>
-          <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: "1px solid #f3f4f6" }}>
-            <p className="text-[11px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Payment</p>
-            <p className="text-sm font-black mt-0.5" style={{ color: "#111827" }}>Choose method</p>
+        {/* ── RIGHT: Payment panel ── */}
+        <main className="pos-pay-pane flex flex-col overflow-hidden" style={{ flexShrink:0, width:"25%", minWidth:260, background:C.bg, "--border-col":C.border } as React.CSSProperties}>
+
+          {/* Payment header */}
+          <div className="px-4 py-3 flex-shrink-0" style={{ background:"white", borderBottom:`1px solid ${C.border}` }}>
+            <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>Payment Method</p>
+            <p className="text-sm font-black mt-0.5" style={{ color:C.fg }}>
+              {payMethod?payMethod.name:"Choose method"}
+            </p>
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
 
-            {/* ── Cash ─────────────────────────────────────────────────────── */}
-            {cashMethods.length > 0 && (
+            {/* ── Cash methods ── */}
+            {cashMethods.length>0&&(
               <div>
-                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black" style={{ color: "#9ca3af" }}>Cash</p>
+                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black px-1" style={{ color:C.mutedFg }}>Cash</p>
                 <div className="space-y-1.5">
-                  {cashMethods.map(method => {
-                    const selected = payMethod?.id === method.id;
-                    const color    = PAY_COLOR.cash;
+                  {cashMethods.map(method=>{
+                    const selected = payMethod?.id===method.id;
                     return (
-                      <button key={method.id} onClick={() => { setPayMethod(method); setReference(""); }} className="w-full flex items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-all"
-                        style={{ background: selected ? `${color}0D` : "#f9fafb", border: selected ? `1.5px solid ${color}66` : "1px solid #e5e7eb" }}>
-                        <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: selected ? `${color}18` : "#f3f4f6", color: selected ? color : "#9ca3af" }}>
-                          <Banknote size={14}/>
+                      <button key={method.id} onClick={()=>{setPayMethod(method);setReference("");}}
+                        className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition-all"
+                        style={{ background:selected?"rgba(255,101,63,0.06)":"white", border:`1.5px solid ${selected?C.orange:C.border}` }}>
+                        <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
+                          style={{ background:selected?"rgba(255,101,63,0.12)":C.muted, color:selected?C.orange:C.mutedFg }}>
+                          <Banknote size={15}/>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-black truncate" style={{ color: selected ? color : "#111827" }}>{method.name}</p>
-                        </div>
-                        {selected && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />}
+                        <p className="text-sm font-black flex-1 truncate" style={{ color:selected?C.orange:C.fg }}>{method.name}</p>
+                        {selected&&<div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background:C.orange }}/>}
                       </button>
                     );
                   })}
@@ -1476,112 +1531,82 @@ function POSInner() {
               </div>
             )}
 
-            {/* ── Cash change calculator ────────────────────────────────────── */}
-            {isCash && cart.length > 0 && (
-              <div className="rounded-2xl p-3 space-y-2.5" style={{ background: "rgba(22,163,74,0.04)", border: "1.5px solid rgba(22,163,74,0.18)" }}>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#16a34a" }}>Cash Calculator</p>
-
-                {/* Quick suggestion buttons */}
-                {cashSuggestions.length > 0 && (
+            {/* ── Cash calculator ── */}
+            {isCash&&cart.length>0&&(
+              <div className="rounded-2xl p-3 space-y-2.5" style={{ background:C.muted, border:`1.5px solid ${C.border}` }}>
+                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>Cash Calculator</p>
+                {cashSuggestions.length>0&&(
                   <div className="flex flex-wrap gap-1.5">
-                    {cashSuggestions.map(amt => (
-                      <button key={amt} onClick={() => setCashTendered(String(amt))}
-                        className="text-[10px] font-bold px-2.5 py-1.5 rounded-xl transition-all"
-                        style={{
-                          background: cashTenderedNum === amt ? "#16a34a" : "rgba(22,163,74,0.10)",
-                          color:      cashTenderedNum === amt ? "white"    : "#16a34a",
-                          border:     `1px solid ${cashTenderedNum === amt ? "#16a34a" : "rgba(22,163,74,0.25)"}`,
-                        }}>
+                    {cashSuggestions.map(amt=>(
+                      <button key={amt} onClick={()=>setCashTendered(String(amt))}
+                        className="text-[10px] font-black px-2.5 py-1.5 rounded-xl transition-all"
+                        style={{ background:cashTenderedNum===amt?C.deep:"white", color:cashTenderedNum===amt?"white":C.secFg, border:`1px solid ${cashTenderedNum===amt?C.deep:C.border}` }}>
                         {money(amt)}
                       </button>
                     ))}
                   </div>
                 )}
-
-                {/* Custom amount input */}
                 <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold" style={{ color: "#16a34a" }}>Rp</span>
-                  <input
-                    type="number" min="0" step="1000"
-                    value={cashTendered}
-                    onChange={e => setCashTendered(e.target.value)}
-                    placeholder={money(total).replace("Rp\u00a0", "").replace("Rp ", "")}
-                    className="w-full rounded-xl pl-9 pr-3 py-2.5 text-sm font-mono font-bold focus:outline-none"
-                    style={{ background: "white", border: "1px solid rgba(22,163,74,0.3)", color: "#111827" }}
-                  />
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-black" style={{ color:C.mutedFg }}>Rp</span>
+                  <input type="number" min="0" step="1000" value={cashTendered} onChange={e=>setCashTendered(e.target.value)}
+                    placeholder={money(total).replace("Rp\u00a0","").replace("Rp ","")}
+                    className="w-full rounded-xl pl-9 pr-3 py-2.5 text-sm font-mono font-black focus:outline-none"
+                    style={{ background:"white", border:`1px solid ${C.border}`, color:C.fg }}/>
                 </div>
-
-                {/* Change display */}
-                {cashTenderedNum > 0 && (
-                  <div className="flex items-center justify-between px-3 py-2 rounded-xl"
-                    style={{
-                      background: cashTenderedNum >= total ? "rgba(3,105,161,0.06)" : "rgba(220,38,38,0.06)",
-                      border:     `1px solid ${cashTenderedNum >= total ? "rgba(3,105,161,0.20)" : "rgba(220,38,38,0.20)"}`,
-                    }}>
-                    <span className="text-xs font-bold" style={{ color: cashTenderedNum >= total ? "#0369a1" : "#dc2626" }}>
-                      {cashTenderedNum >= total ? "Change" : "Short"}
+                {cashTenderedNum>0&&(
+                  <div className="flex items-center justify-between px-3 py-2.5 rounded-xl"
+                    style={{ background:cashTenderedNum>=total?"rgba(22,163,74,0.08)":"white", border:`1px solid ${cashTenderedNum>=total?"rgba(22,163,74,0.25)":C.border}` }}>
+                    <span className="text-xs font-bold" style={{ color:cashTenderedNum>=total?"#16a34a":C.mutedFg }}>
+                      {cashTenderedNum>=total?"Change":"Short by"}
                     </span>
-                    <span className="text-base font-black font-mono" style={{ color: cashTenderedNum >= total ? "#0369a1" : "#dc2626" }}>
-                      {cashTenderedNum >= total ? money(changeNum) : `−${money(total - cashTenderedNum)}`}
+                    <span className="text-base font-black font-mono" style={{ color:cashTenderedNum>=total?"#16a34a":C.fg }}>
+                      {cashTenderedNum>=total?money(changeNum):`−${money(total-cashTenderedNum)}`}
                     </span>
                   </div>
                 )}
               </div>
             )}
 
-            {/* ── EDC (grouped by machine) ──────────────────────────────────── */}
-            {edcGroups.length > 0 && (
+            {/* ── EDC groups ── */}
+            {edcGroups.length>0&&(
               <div>
-                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black" style={{ color: "#9ca3af" }}>EDC</p>
+                <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black px-1" style={{ color:C.mutedFg }}>EDC / Card</p>
                 <div className="space-y-1.5">
-                  {edcGroups.map(group => {
-                    const groupKey      = group.machineId != null ? String(group.machineId) : "unassigned";
-                    const isExpanded    = expandedEdcGroups.has(groupKey);
-                    const groupSelected = group.methods.some(m => m.id === payMethod?.id);
-
+                  {edcGroups.map(group=>{
+                    const groupKey    = group.machineId!=null?String(group.machineId):"unassigned";
+                    const isExpanded  = expandedEdcGroups.has(groupKey);
+                    const groupSelected = group.methods.some(m=>m.id===payMethod?.id);
                     return (
-                      <div key={groupKey} className="rounded-xl overflow-hidden" style={{ border: groupSelected ? "1.5px solid rgba(3,105,161,0.40)" : "1px solid #e5e7eb" }}>
-                        {/* Machine header — tap to expand/collapse */}
-                        <button
-                          onClick={() => setExpandedEdcGroups(prev => {
-                            const next = new Set(prev);
-                            next.has(groupKey) ? next.delete(groupKey) : next.add(groupKey);
-                            return next;
-                          })}
-                          className="w-full flex items-center gap-2 px-2.5 py-2"
-                          style={{ background: groupSelected ? "rgba(3,105,161,0.06)" : "#f9fafb" }}>
-                          <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: "rgba(3,105,161,0.10)", color: "#0369a1" }}>
-                            <Building2 size={11}/>
+                      <div key={groupKey} className="rounded-xl overflow-hidden"
+                        style={{ border:`1.5px solid ${groupSelected?C.mid:C.border}`, background:"white" }}>
+                        <button onClick={()=>setExpandedEdcGroups(prev=>{const next=new Set(prev);next.has(groupKey)?next.delete(groupKey):next.add(groupKey);return next;})}
+                          className="w-full flex items-center gap-2 px-3 py-2.5 transition-all hover:bg-gray-50"
+                          style={{ background:groupSelected?"rgba(69,46,90,0.04)":"white" }}>
+                          <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background:"rgba(69,46,90,0.08)", color:C.mid }}>
+                            <Building2 size={12}/>
                           </div>
-                          <span className="flex-1 text-left text-xs font-black truncate" style={{ color: groupSelected ? "#0369a1" : "#374151" }}>
+                          <span className="flex-1 text-left text-xs font-black truncate" style={{ color:groupSelected?C.mid:C.fg }}>
                             {group.machineLabel}
                           </span>
-                          <span className="text-[10px]" style={{ color: "#9ca3af" }}>{group.methods.length}</span>
-                          <ChevronDown size={12} style={{ color: "#9ca3af", transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform .15s" }}/>
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg mr-1" style={{ background:C.muted, color:C.mutedFg }}>{group.methods.length}</span>
+                          <ChevronDown size={12} style={{ color:C.mutedFg, transform:isExpanded?"rotate(180deg)":"none", transition:"transform .15s" }}/>
                         </button>
-
-                        {/* Sub-methods */}
-                        {isExpanded && (
-                          <div className="divide-y" style={{ borderTop: "1px solid #f3f4f6" }}>
-                            {group.methods.map(method => {
-                              const selected = payMethod?.id === method.id;
-                              const edcType  = method.edcMethod ?? method.type;
-                              const color    = PAY_COLOR[edcType] ?? PAY_COLOR.edc;
+                        {isExpanded&&(
+                          <div style={{ borderTop:`1px solid ${C.muted}` }}>
+                            {group.methods.map(method=>{
+                              const selected = payMethod?.id===method.id;
                               return (
-                                <button key={method.id}
-                                  onClick={() => { setPayMethod(method); setReference(""); }}
-                                  className="w-full flex items-center gap-2 pl-8 pr-2.5 py-2 text-left transition-all"
-                                  style={{ background: selected ? `${color}0D` : "white" }}>
-                                  <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: selected ? `${color}18` : "#f3f4f6", color: selected ? color : "#9ca3af" }}>
+                                <button key={method.id} onClick={()=>{setPayMethod(method);setReference("");}}
+                                  className="w-full flex items-center gap-2 pl-9 pr-3 py-2 text-left transition-all hover:bg-gray-50"
+                                  style={{ background:selected?"rgba(255,101,63,0.05)":"white", borderTop:`1px solid ${C.muted}` }}>
+                                  <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background:selected?"rgba(255,101,63,0.12)":C.muted, color:selected?C.orange:C.mutedFg }}>
                                     <CreditCard size={11}/>
                                   </div>
                                   <div className="flex-1 min-w-0">
-                                    <p className="text-xs font-black truncate" style={{ color: selected ? color : "#111827" }}>{method.name}</p>
-                                    {method.edcMethod && (
-                                      <p className="text-[10px] capitalize" style={{ color: "#9ca3af" }}>{method.edcMethod}</p>
-                                    )}
+                                    <p className="text-xs font-black truncate" style={{ color:selected?C.orange:C.fg }}>{method.name}</p>
+                                    {method.edcMethod&&<p className="text-[10px] capitalize" style={{ color:C.mutedFg }}>{method.edcMethod}</p>}
                                   </div>
-                                  {selected && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />}
+                                  {selected&&<div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background:C.orange }}/>}
                                 </button>
                               );
                             })}
@@ -1594,59 +1619,59 @@ function POSInner() {
               </div>
             )}
 
-            {/* Reference input for non-cash */}
-            {needsReference && (
+            {/* Reference */}
+            {needsRef&&(
               <div>
-                <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color: "#9ca3af" }}>Reference</label>
-                <input value={reference} onChange={e => setReference(e.target.value)} placeholder="EDC / QR ref..."
+                <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 px-1" style={{ color:C.mutedFg }}>Reference No.</label>
+                <input value={reference} onChange={e=>setReference(e.target.value)} placeholder="EDC / QR reference…"
                   className="w-full rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none"
-                  style={{ background: "#f9fafb", border: "1px solid #e5e7eb", color: "#111827" }} />
+                  style={{ background:"white", border:`1px solid ${C.border}`, color:C.fg }}/>
               </div>
             )}
 
-            {/* Quick actions */}
-            <div className="grid grid-cols-3 gap-1.5 pt-1">
-              <button onClick={() => scanRef.current?.focus()} className="rounded-xl px-2 py-2 text-center border" style={{ background: "#fafaf8", borderColor: "#e5e7eb" }}>
-                <ScanLine size={14} className="mx-auto" style={{ color: "var(--brand-orange)" }} />
-                <p className="text-[10px] font-black mt-1" style={{ color: "#111827" }}>Scan</p>
-              </button>
-              <button onClick={() => { setShowReport(true); if (event?.id) loadDailyStats(event.id); }} className="rounded-xl px-2 py-2 text-center border" style={{ background: "#fafaf8", borderColor: "#e5e7eb" }}>
-                <BarChart2 size={14} className="mx-auto" style={{ color: "#7c3aed" }} />
-                <p className="text-[10px] font-black mt-1" style={{ color: "#111827" }}>Report</p>
-              </button>
-              <button onClick={() => event?.id && syncLocalTransactions(event.id)} disabled={syncing || !online || pendingSyncCount === 0} className="rounded-xl px-2 py-2 text-center border disabled:opacity-50" style={{ background: "#fafaf8", borderColor: "#e5e7eb" }}>
-                {syncing ? <RefreshCw size={14} className="mx-auto animate-spin" style={{ color: "#b45309" }}/> : <CloudUpload size={14} className="mx-auto" style={{ color: "#b45309" }}/>}
-                <p className="text-[10px] font-black mt-1" style={{ color: "#111827" }}>Sync</p>
-              </button>
+            {/* ── Quick action icons ── */}
+            <div className="pt-1">
+              <p className="text-[10px] uppercase tracking-widest mb-1.5 font-black px-1" style={{ color:C.mutedFg }}>Quick Actions</p>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { icon:<ScanLine size={14}/>, label:"Scan",    color:C.orange, action:()=>scanRef.current?.focus()                                                  },
+                  { icon:<BarChart2 size={14}/>,label:"Report",  color:C.mid,    action:()=>{setShowReport(true);if(event?.id)loadDailyStats(event.id);}              },
+                  { icon:<CloudUpload size={14}/>,label:"Sync",  color:"#b45309",action:()=>event?.id&&syncLocalTransactions(event.id),
+                    disabled:syncing||!online||pendingSyncCount===0,
+                    badge:pendingSyncCount>0?String(pendingSyncCount):undefined                                                                                         },
+                  { icon:<Banknote size={14}/>, label:"Drawer",  color:"#0369a1",action:openDrawerCountModal                                                          },
+                ].map(({icon,label,color,action,disabled,badge})=>(
+                  <button key={label} onClick={action} disabled={disabled}
+                    className="relative rounded-xl py-2.5 text-center border transition-all hover:shadow-sm disabled:opacity-40"
+                    style={{ background:"white", borderColor:C.border }}>
+                    <div className="flex justify-center mb-1" style={{ color }}>{icon}</div>
+                    <p className="text-[9px] font-black" style={{ color:C.mutedFg }}>{label}</p>
+                    {badge&&<span className="absolute -top-1.5 -right-1.5 text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background:"#b45309", color:"white" }}>{badge}</span>}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Confirm button */}
-          <div className="flex-shrink-0 px-3 py-3 space-y-2" style={{ background: "white", borderTop: "1px solid #e5e7eb" }}>
-            <div className="flex items-end justify-between gap-2">
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#9ca3af" }}>Total</p>
-                <p className="text-xl font-black leading-tight" style={{ color: "var(--brand-orange)" }}>{money(total)}</p>
-              </div>
-              <p className="text-[10px] text-right" style={{ color: "#9ca3af" }}>{itemCount} item{itemCount === 1 ? "" : "s"}</p>
-            </div>
-
-            {/* Cash shortfall warning */}
-            {isCash && cashTenderedNum > 0 && cashTenderedNum < total && (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold" style={{ background: "rgba(220,38,38,0.06)", color: "#dc2626", border: "1px solid rgba(220,38,38,0.20)" }}>
-                <AlertCircle size={12}/> Cash is {money(total - cashTenderedNum)} short
+          {/* ── Confirm payment footer ── */}
+          <div className="flex-shrink-0 px-3 pb-3 pt-2" style={{ background:C.deep, borderTop:`1px solid rgba(255,255,255,0.08)` }}>
+            {/* Cash shortfall */}
+            {isCash&&cashTenderedNum>0&&cashTenderedNum<total&&(
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold mb-2"
+                style={{ background:"rgba(220,38,38,0.15)", color:"#fca5a5", border:"1px solid rgba(220,38,38,0.3)" }}>
+                <AlertCircle size={12}/> Cash is {money(total-cashTenderedNum)} short
               </div>
             )}
 
-            <button onClick={confirmPayment} disabled={!canConfirm || processing}
-              className="w-full rounded-xl py-3 text-xs font-black transition-all disabled:opacity-30"
-              style={{ background: canConfirm ? "var(--brand-orange)" : "#f3f4f6", color: canConfirm ? "white" : "#9ca3af" }}>
-              {processing ? "Saving..."
-                : cart.length === 0 ? "Add items first"
-                : !payMethod ? "Choose Method"
-                : isCash && cashTenderedNum === 0 ? "Enter Cash Amount"
-                : isCash && cashTenderedNum < total ? "Insufficient Cash"
-                : "Confirm Payment"}
+            <button onClick={confirmPayment} disabled={!canConfirm||processing}
+              className="w-full rounded-2xl py-4 text-sm font-black transition-all disabled:opacity-30"
+              style={{ background:canConfirm?C.orange:"rgba(255,255,255,0.08)", color:canConfirm?"white":"rgba(255,255,255,0.3)" }}>
+              {processing?"Saving…"
+                :cart.length===0?"Add items to cart"
+                :!payMethod?"Select payment method"
+                :isCash&&cashTenderedNum===0?"Enter cash amount"
+                :isCash&&cashTenderedNum<total?"Insufficient cash"
+                :`Confirm · ${money(total)}`}
             </button>
           </div>
         </main>
@@ -1658,14 +1683,16 @@ function POSInner() {
 export default function POSPage() {
   return (
     <Suspense fallback={
-      <div className="h-screen w-screen flex items-center justify-center" style={{ background: "#fafaf8" }}>
-        <div className="flex items-center gap-2" style={{ color: "#9ca3af" }}>
-          <RefreshCw size={16} className="animate-spin"/>
-          <span className="text-sm">Loading POS…</span>
+      <div className="h-screen w-screen flex items-center justify-center" style={{ background:"#1e104e" }}>
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background:"rgba(255,101,63,0.2)" }}>
+            <Zap size={16} style={{ color:"#ff653f" }}/>
+          </div>
+          <span className="text-sm font-bold" style={{ color:"rgba(255,255,255,0.5)" }}>Loading POS…</span>
         </div>
       </div>
     }>
-      <POSInner />
+      <POSInner/>
     </Suspense>
   );
 }

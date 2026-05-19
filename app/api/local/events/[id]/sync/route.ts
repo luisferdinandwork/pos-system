@@ -1,8 +1,12 @@
 // app/api/local/events/[id]/sync/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { syncLocalTransactionsToNeon } from "@/lib/local-pos";
+import {
+  syncLocalReceiptPrintCountsToNeon,
+  syncLocalTransactionsToNeon,
+} from "@/lib/local-pos";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(
   _req: NextRequest,
@@ -14,16 +18,24 @@ export async function POST(
 
     if (!Number.isFinite(eventId)) {
       return NextResponse.json(
-        { error: "Invalid event ID" },
+        { error: "Invalid event ID." },
         { status: 400 }
       );
     }
 
-    const result = await syncLocalTransactionsToNeon(eventId);
+    const transactionSync = await syncLocalTransactionsToNeon(eventId);
+    const receiptPrintCountSync =
+      await syncLocalReceiptPrintCountsToNeon(eventId);
 
-    console.log("[LocalSyncRoute] Result:", JSON.stringify(result, null, 2));
-
-    return NextResponse.json(result);
+    return NextResponse.json(
+      {
+        ...transactionSync,
+        receiptPrintCountSync,
+      },
+      {
+        status: transactionSync.failed > 0 ? 207 : 200,
+      }
+    );
   } catch (error) {
     console.error("[LocalSyncRoute] Failed:", error);
 
@@ -32,7 +44,7 @@ export async function POST(
         error:
           error instanceof Error
             ? error.message
-            : "Failed to sync local transactions",
+            : "Failed to sync local transactions.",
       },
       { status: 500 }
     );

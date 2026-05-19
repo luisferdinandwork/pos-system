@@ -12,16 +12,31 @@ import {
 } from "drizzle-orm/pg-core";
 
 // ── Events ────────────────────────────────────────────────────────────────────
-export const events = pgTable("events", {
-  id:          serial("id").primaryKey(),
-  name:        text("name").notNull(),
-  location:    text("location"),
-  description: text("description"),
-  status:      text("status").notNull().default("draft"),
-  startDate:   timestamp("start_date"),
-  endDate:     timestamp("end_date"),
-  createdAt:   timestamp("created_at").defaultNow(),
-});
+// ── Events ────────────────────────────────────────────────────────────────────
+export const events = pgTable(
+  "events",
+  {
+    id: serial("id").primaryKey(),
+    code: text("code").notNull(),
+    verifierCode: text("verifier_code").notNull(),
+
+    name: text("name").notNull(),
+    location: text("location"),
+    description: text("description"),
+    status: text("status").notNull().default("draft"),
+    startDate: timestamp("start_date"),
+    endDate: timestamp("end_date"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    codeUnique: uniqueIndex("events_code_unique").on(table.code),
+    verifierCodeUnique: uniqueIndex("events_verifier_code_unique").on(
+      table.verifierCode
+    ),
+    statusIdx: index("events_status_idx").on(table.status),
+  })
+);
 
 // ── Event Items ───────────────────────────────────────────────────────────────
 export const eventItems = pgTable("event_items", {
@@ -254,27 +269,48 @@ export const eventReceiptTemplates = pgTable(
 );
 
 // ── Transactions ──────────────────────────────────────────────────────────────
-export const transactions = pgTable("transactions", {
-  id:           serial("id").primaryKey(),
-  // Human-readable ID: yyyyMM + 5-digit sequence per event per month → e.g. "20260100001"
-  displayId:    text("display_id").unique(),
-  eventId:      integer("event_id").notNull()
-    .references(() => events.id, { onDelete: "cascade" }),
-  clientTxnId:  text("client_txn_id").unique(),
-  // Cashier session that created this transaction (nullable — legacy data)
-  cashierSessionId: integer("cashier_session_id")
-    .references(() => cashierSessions.id, { onDelete: "set null" }),
-  totalAmount:  numeric("total_amount",  { precision: 12, scale: 2 }).notNull(),
-  discount:     numeric("discount",      { precision: 12, scale: 2 }).notNull().default("0"),
-  finalAmount:  numeric("final_amount",  { precision: 12, scale: 2 }).notNull(),
-  // For cash payments: amount tendered by the customer
-  cashTendered: numeric("cash_tendered", { precision: 12, scale: 2 }),
-  // Computed change: cashTendered - finalAmount (stored for receipt printing)
-  changeAmount: numeric("change_amount", { precision: 12, scale: 2 }),
-  paymentMethod:    text("payment_method"),
-  paymentReference: text("payment_reference"),
-  createdAt:    timestamp("created_at").defaultNow(),
-});
+export const transactions = pgTable(
+  "transactions",
+  {
+    id:        serial("id").primaryKey(),
+
+    // Official transaction number shown to users/receipts/reports.
+    // Format: 0000YYYYMM00000 where the first 0000 is events.code.
+    // Example: 120720260500001.
+    displayId: text("display_id").notNull(),
+
+    eventId:   integer("event_id").notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+
+    // Stable idempotency key from POS/local POS.
+    // Offline/local transactions must send this when syncing to avoid duplicates.
+    clientTxnId: text("client_txn_id").unique(),
+
+    cashierSessionId: integer("cashier_session_id")
+      .references(() => cashierSessions.id, { onDelete: "set null" }),
+    cashierName: text("cashier_name"),
+
+    totalAmount:  numeric("total_amount",  { precision: 12, scale: 2 }).notNull(),
+    discount:     numeric("discount",      { precision: 12, scale: 2 }).notNull().default("0"),
+    finalAmount:  numeric("final_amount",  { precision: 12, scale: 2 }).notNull(),
+    cashTendered: numeric("cash_tendered", { precision: 12, scale: 2 }),
+    changeAmount: numeric("change_amount", { precision: 12, scale: 2 }),
+    paymentMethod:    text("payment_method"),
+    paymentReference: text("payment_reference"),
+
+    // Total receipt prints stored directly on the transaction.
+    // This replaces needing to calculate from receipt_print_logs for POS/history.
+    receiptPrintCount: integer("receipt_print_count").notNull().default(0),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    displayUnique: uniqueIndex("transactions_display_id_unique").on(table.displayId),
+    eventIdx:      index("transactions_event_idx").on(table.eventId),
+    createdAtIdx:  index("transactions_created_at_idx").on(table.createdAt),
+  })
+);
 
 // ── Transaction Items ─────────────────────────────────────────────────────────
 export const transactionItems = pgTable("transaction_items", {
@@ -294,7 +330,7 @@ export const transactionItems = pgTable("transaction_items", {
 });
 
 // ── Receipt Print Logs ────────────────────────────────────────────────────────
-// Tracks every time a receipt is printed, for audit and reprinting.
+// LEGACY/AUDIT ONLY. New POS code should update transactions.receiptPrintCount directly.
 export const receiptPrintLogs = pgTable("receipt_print_logs", {
   id:            serial("id").primaryKey(),
   transactionId: integer("transaction_id").notNull()

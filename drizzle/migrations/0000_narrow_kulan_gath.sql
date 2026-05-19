@@ -10,6 +10,20 @@ CREATE TABLE "auth_users" (
 	CONSTRAINT "auth_users_username_unique" UNIQUE("username")
 );
 --> statement-breakpoint
+CREATE TABLE "cash_drawer_counts" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"event_id" integer NOT NULL,
+	"cashier_session_id" integer,
+	"counted_by" text,
+	"expected_cash" numeric(12, 2) DEFAULT '0' NOT NULL,
+	"actual_cash" numeric(12, 2) DEFAULT '0' NOT NULL,
+	"difference" numeric(12, 2) DEFAULT '0' NOT NULL,
+	"reason" text DEFAULT 'count' NOT NULL,
+	"notes" text,
+	"counted_at" timestamp DEFAULT now(),
+	"created_at" timestamp DEFAULT now()
+);
+--> statement-breakpoint
 CREATE TABLE "cashier_sessions" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"event_id" integer NOT NULL,
@@ -45,6 +59,30 @@ CREATE TABLE "event_items" (
 	"net_price" numeric(12, 2) NOT NULL,
 	"stock" integer DEFAULT 0 NOT NULL,
 	"created_at" timestamp DEFAULT now()
+);
+--> statement-breakpoint
+CREATE TABLE "event_receipt_templates" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"event_id" integer NOT NULL,
+	"is_active" boolean DEFAULT true NOT NULL,
+	"store_name" text,
+	"headline" text,
+	"address" text,
+	"phone" text,
+	"instagram" text,
+	"tax_id" text,
+	"logo_url" text,
+	"footer_text" text,
+	"return_policy" text,
+	"promo_message" text,
+	"show_event_name" boolean DEFAULT true NOT NULL,
+	"show_cashier_name" boolean DEFAULT true NOT NULL,
+	"show_item_sku" boolean DEFAULT true NOT NULL,
+	"show_payment_reference" boolean DEFAULT true NOT NULL,
+	"show_discount_breakdown" boolean DEFAULT true NOT NULL,
+	"custom_css" text,
+	"created_at" timestamp DEFAULT now(),
+	"updated_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
 CREATE TABLE "events" (
@@ -170,6 +208,7 @@ CREATE TABLE "transactions" (
 	"event_id" integer NOT NULL,
 	"client_txn_id" text,
 	"cashier_session_id" integer,
+	"cashier_name" text,
 	"total_amount" numeric(12, 2) NOT NULL,
 	"discount" numeric(12, 2) DEFAULT '0' NOT NULL,
 	"final_amount" numeric(12, 2) NOT NULL,
@@ -183,8 +222,11 @@ CREATE TABLE "transactions" (
 );
 --> statement-breakpoint
 ALTER TABLE "auth_users" ADD CONSTRAINT "auth_users_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "cash_drawer_counts" ADD CONSTRAINT "cash_drawer_counts_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "cash_drawer_counts" ADD CONSTRAINT "cash_drawer_counts_cashier_session_id_cashier_sessions_id_fk" FOREIGN KEY ("cashier_session_id") REFERENCES "public"."cashier_sessions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "cashier_sessions" ADD CONSTRAINT "cashier_sessions_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "event_items" ADD CONSTRAINT "event_items_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_receipt_templates" ADD CONSTRAINT "event_receipt_templates_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "payment_methods" ADD CONSTRAINT "payment_methods_edc_machine_id_edc_machines_id_fk" FOREIGN KEY ("edc_machine_id") REFERENCES "public"."edc_machines"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "payments" ADD CONSTRAINT "payments_transaction_id_transactions_id_fk" FOREIGN KEY ("transaction_id") REFERENCES "public"."transactions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "promo_items" ADD CONSTRAINT "promo_items_promo_id_promos_id_fk" FOREIGN KEY ("promo_id") REFERENCES "public"."promos"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -201,6 +243,10 @@ ALTER TABLE "transaction_items" ADD CONSTRAINT "transaction_items_transaction_id
 ALTER TABLE "transaction_items" ADD CONSTRAINT "transaction_items_event_item_id_event_items_id_fk" FOREIGN KEY ("event_item_id") REFERENCES "public"."event_items"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "transactions" ADD CONSTRAINT "transactions_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "transactions" ADD CONSTRAINT "transactions_cashier_session_id_cashier_sessions_id_fk" FOREIGN KEY ("cashier_session_id") REFERENCES "public"."cashier_sessions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "cash_drawer_counts_event_idx" ON "cash_drawer_counts" USING btree ("event_id");--> statement-breakpoint
+CREATE INDEX "cash_drawer_counts_session_idx" ON "cash_drawer_counts" USING btree ("cashier_session_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "event_receipt_templates_event_unique" ON "event_receipt_templates" USING btree ("event_id");--> statement-breakpoint
+CREATE INDEX "event_receipt_templates_event_idx" ON "event_receipt_templates" USING btree ("event_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "stock_transaction_types_code_unique" ON "stock_transaction_types" USING btree ("code");--> statement-breakpoint
 CREATE INDEX "stock_transactions_event_item_idx" ON "stock_transactions" USING btree ("event_item_id");--> statement-breakpoint
 CREATE INDEX "stock_transactions_type_idx" ON "stock_transactions" USING btree ("type_id");--> statement-breakpoint

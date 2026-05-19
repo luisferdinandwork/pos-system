@@ -1,12 +1,8 @@
 // app/api/local/events/[id]/transactions/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createLocalTransaction,
-  getLocalTransactionsByEvent,
-  makeLocalClientTxnId,
-} from "@/lib/local-pos";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(
   _req: NextRequest,
@@ -16,25 +12,27 @@ export async function GET(
     const { id } = await params;
     const eventId = Number(id);
 
-    if (!Number.isFinite(eventId)) {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
       return NextResponse.json(
-        { error: "Invalid event ID" },
+        { error: "Invalid event ID." },
         { status: 400 }
       );
     }
+
+    const { getLocalTransactionsByEvent } = await import("@/lib/local-pos");
 
     const txns = await getLocalTransactionsByEvent(eventId);
 
     return NextResponse.json(txns);
   } catch (error) {
-    console.error("[LocalTransactionsRoute] Failed:", error);
+    console.error("[LocalTransactionsRoute GET] Failed:", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Failed to load local transactions",
+            : "Failed to load local transactions.",
       },
       { status: 500 }
     );
@@ -49,35 +47,53 @@ export async function POST(
     const { id } = await params;
     const eventId = Number(id);
 
-    if (!Number.isFinite(eventId)) {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
       return NextResponse.json(
-        { error: "Invalid event ID" },
+        { error: "Invalid event ID." },
         { status: 400 }
       );
     }
 
-    const body = await req.json();
+    const body = (await req.json()) as Record<string, unknown>;
+
+    const {
+      createLocalTransaction,
+      makeLocalClientTxnId,
+      getLocalEventCode,
+      generateLocalDisplayId,
+    } = await import("@/lib/local-pos");
+
+    const eventCode = getLocalEventCode(eventId);
+    const createdAt = String(body.createdAt ?? new Date().toISOString());
 
     const clientTxnId =
-      body.clientTxnId || makeLocalClientTxnId(eventId);
+      typeof body.clientTxnId === "string" && body.clientTxnId.trim()
+        ? body.clientTxnId.trim()
+        : makeLocalClientTxnId(eventCode);
+
+    const displayId =
+      typeof body.displayId === "string" && body.displayId.trim()
+        ? body.displayId.trim()
+        : generateLocalDisplayId(eventId, new Date(createdAt));
 
     const txn = await createLocalTransaction({
-      ...body,
+      ...(body as any),
       clientTxnId,
+      displayId,
       eventId,
-      createdAt: body.createdAt ?? new Date().toISOString(),
+      createdAt,
     });
 
     return NextResponse.json(txn, { status: 201 });
   } catch (error) {
-    console.error("[LocalTransactionsRoute] Failed to create:", error);
+    console.error("[LocalTransactionsRoute POST] Failed:", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Failed to save local transaction",
+            : "Failed to save local transaction.",
       },
       { status: 500 }
     );

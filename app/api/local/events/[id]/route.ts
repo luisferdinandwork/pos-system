@@ -1,8 +1,8 @@
 // app/api/local/events/[id]/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { deleteLocalEventData } from "@/lib/local-pos";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function DELETE(
   req: NextRequest,
@@ -12,7 +12,7 @@ export async function DELETE(
     const { id } = await params;
     const eventId = Number(id);
 
-    if (!Number.isFinite(eventId)) {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
       return NextResponse.json(
         { error: "Invalid event ID" },
         { status: 400 }
@@ -21,6 +21,8 @@ export async function DELETE(
 
     const { searchParams } = new URL(req.url);
     const force = searchParams.get("force") === "true";
+
+    const { deleteLocalEventData } = await import("@/lib/local-pos");
 
     const result = deleteLocalEventData(eventId, { force });
 
@@ -31,7 +33,7 @@ export async function DELETE(
         ? error.message
         : "Failed to delete local POS data";
 
-    const status = message.includes("unsynced") ? 409 : 500;
+    const status = message.toLowerCase().includes("unsynced") ? 409 : 500;
 
     return NextResponse.json({ error: message }, { status });
   }
