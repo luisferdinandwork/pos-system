@@ -1,4 +1,4 @@
-// app/(pos)/pos/page.tsx — REDESIGNED
+// app/(pos)/pos/page.tsx
 // ─ Layout preserved: left = cart+scanner, right = payment panel
 // ─ Styling: brand palette (--brand-deep, --brand-mid, --brand-orange, --brand-yellow)
 // ─ Single total display, grouped action buttons, responsive tablet/mobile
@@ -253,6 +253,35 @@ function POSInner() {
   // ── API helpers (all logic unchanged) ────────────────────────────────────
   async function loadPreparedEvents() {
     try { const d = await fetch("/api/local/prepared-events",{cache:"no-store"}).then(r=>r.json()); setPreparedEvents(Array.isArray(d.events)?d.events:[]); } catch { setPreparedEvents([]); }
+  }
+
+  async function getReceiptTemplateForPrint() {
+    if (lastTxnSnapshot?.receiptTemplate) {
+      return lastTxnSnapshot.receiptTemplate;
+    }
+
+    if (receiptTemplate) {
+      return receiptTemplate;
+    }
+
+    if (!event?.id) {
+      return null;
+    }
+
+    const freshTemplate = await loadReceiptTemplate(event.id);
+
+    if (freshTemplate) {
+      setLastTxnSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              receiptTemplate: freshTemplate,
+            }
+          : prev
+      );
+    }
+
+    return freshTemplate;
   }
 
   async function loadReceiptTemplate(eventId: number) {
@@ -694,179 +723,357 @@ function POSInner() {
 
   function PaymentSuccessOverlay() {
     if (screen !== "success") return null;
- 
-    const snap         = lastTxnSnapshot;
-    const snapCart     = snap?.cart     ?? cart;
-    const snapPay      = snap?.payMethod ?? payMethod;
+
+    const snap = lastTxnSnapshot;
+    const snapCart = snap?.cart ?? cart;
+    const snapPay = snap?.payMethod ?? payMethod;
     const snapDiscount = snap?.discount ?? discount;
-    const snapTotal    = snap?.total    ?? total;
-    const snapQty      = snapCart.reduce((s, i) => s + i.quantity, 0);
-    const snapCash     = snap?.cashTendered ?? null;
-    const snapChange   = snap?.changeAmount ?? null;
-    const snapCashier  = snap?.cashierName  ?? cashierSession?.cashierName ?? null;
-    const printCount   = snap?.receiptPrintCount ?? 0;
- 
+    const snapTotal = snap?.total ?? total;
+    const snapQty = snapCart.reduce((sum, item) => sum + item.quantity, 0);
+    const snapCash = snap?.cashTendered ?? null;
+    const snapChange = snap?.changeAmount ?? null;
+    const snapCashier = snap?.cashierName ?? cashierSession?.cashierName ?? null;
+    const printCount = Number(snap?.receiptPrintCount ?? 0);
+
     async function handlePrintSuccess() {
       if (!snap) return;
- 
+
+      /**
+       * Receipt print number logic:
+       * current count 0 → next print 1 → original receipt, no re-print marker
+       * current count 1 → next print 2 → RE-PRINTED #2
+       * current count 2 → next print 3 → RE-PRINTED #3
+       */
+      const currentPrintCount = Number(snap.receiptPrintCount ?? 0);
+      const nextPrintNumber = currentPrintCount + 1;
+
+      /**
+       * Important:
+       * Always resolve the latest event receipt template before printing.
+       * Without this, snap.receiptTemplate can be null because loadReceiptTemplate()
+       * runs async when opening/preparing the event.
+       */
+      const templateForPrint = await getReceiptTemplateForPrint();
+
       const txnForPrint = {
-        clientTxnId:      snap.displayId,   // human-readable ID on the receipt
-        totalAmount:      String(snap.subtotal),
-        discount:         String(snap.discount),
-        finalAmount:      String(snap.total),
-        paymentMethod:    snapPay?.name ?? "—",
-        paymentReference: null,
-        cashTendered:     snap.cashTendered != null ? String(snap.cashTendered) : null,
-        changeAmount:     snap.changeAmount != null ? String(snap.changeAmount) : null,
-        createdAt:        new Date().toISOString(),
+        clientTxnId: snap.clientTxnId,
+        displayId: snap.displayId,
+        eventName: snap.eventName ?? event?.name ?? null,
+        cashierName: snap.cashierName ?? cashierSession?.cashierName ?? null,
+        totalAmount: String(snap.subtotal),
+        discount: String(snap.discount),
+        finalAmount: String(snap.total),
+        paymentMethod: snapPay?.provider
+          ? `${snapPay.name} (${snapPay.provider})`
+          : snapPay?.name ?? "—",
+        paymentReference: reference || null,
+        cashTendered:
+          snap.cashTendered != null ? String(snap.cashTendered) : null,
+        changeAmount:
+          snap.changeAmount != null ? String(snap.changeAmount) : null,
+        createdAt: new Date().toISOString(),
       };
- 
+
       const itemsForPrint = snap.cart.map((item) => ({
-        productName:  item.productName,
-        quantity:     item.quantity,
-        unitPrice:    String(item.unitPrice),
-        discountAmt:  String(item.discountAmt),
-        finalPrice:   String(item.finalPrice),
-        subtotal:     String(item.finalPrice * item.quantity),
+        itemId: item.itemId,
+        productName: item.productName,
+        quantity: item.quantity,
+        unitPrice: String(item.unitPrice),
+        discountAmt: String(item.discountAmt),
+        finalPrice: String(item.finalPrice),
+        subtotal: String(item.finalPrice * item.quantity),
         promoApplied: item.promoApplied,
       }));
- 
+
       await printReceipt(txnForPrint, itemsForPrint, {
-        template:  snap.receiptTemplate ?? receiptTemplate,
-        eventName: snap.eventName ?? event?.name,
+        template: templateForPrint,
+        eventName: snap.eventName ?? event?.name ?? null,
+        cashierName: snap.cashierName ?? cashierSession?.cashierName ?? null,
+        printNumber: nextPrintNumber,
       });
- 
-      // incrementLocalReceiptPrintCount returns { receiptPrintCount, ... }
-      // extract the count from the returned object
-      const result    = await incrementLocalReceiptPrintCount(snap.clientTxnId);
-      const nextCount = typeof result === "number"
-        ? result
-        : (result as any)?.receiptPrintCount ?? (printCount + 1);
- 
+
+      const result = await incrementLocalReceiptPrintCount(snap.clientTxnId);
+
+      const nextCount =
+        typeof result === "number"
+          ? result
+          : Number((result as any)?.receiptPrintCount ?? nextPrintNumber);
+
       setLastTxnSnapshot((prev) =>
-        prev ? { ...prev, receiptPrintCount: nextCount } : prev
+        prev
+          ? {
+              ...prev,
+              receiptTemplate: templateForPrint,
+              receiptPrintCount: nextCount,
+            }
+          : prev
       );
- 
+
       if (event?.id && navigator.onLine) {
         try {
           await syncLocalReceiptPrintCounts(event.id);
-        } catch (err) {
-          console.warn("[POS] Receipt print count sync failed:", err);
+        } catch (error) {
+          console.warn("[POS] Receipt print count sync failed:", error);
         }
       }
- 
-      flash(`Receipt printed ${nextCount}×`);
+
+      flash(
+        nextCount > 1
+          ? `Receipt re-printed #${nextCount}`
+          : "Receipt printed"
+      );
     }
- 
+
     return (
       <ModalShell onClose={nextTransaction}>
-        <div className="w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden anim-fade-up"
-          style={{ background: "white" }}>
- 
+        <div
+          className="w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden anim-fade-up"
+          style={{ background: "white" }}
+        >
           {/* Success header */}
-          <div className="px-6 pt-7 pb-5 text-center"
-            style={{ background: `linear-gradient(135deg,rgba(30,16,78,0.03),rgba(255,101,63,0.04))`, borderBottom: `2px dashed ${C.border}` }}>
-            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center"
-              style={{ background: "rgba(22,163,74,0.08)", border: "2px solid rgba(22,163,74,0.2)" }}>
+          <div
+            className="px-6 pt-7 pb-5 text-center"
+            style={{
+              background:
+                "linear-gradient(135deg,rgba(30,16,78,0.03),rgba(255,101,63,0.04))",
+              borderBottom: `2px dashed ${C.border}`,
+            }}
+          >
+            <div
+              className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center"
+              style={{
+                background: "rgba(22,163,74,0.08)",
+                border: "2px solid rgba(22,163,74,0.2)",
+              }}
+            >
               <CheckCircle2 size={30} style={{ color: "#16a34a" }} />
             </div>
-            <p className="font-black text-lg" style={{ color: C.fg }}>Payment Complete</p>
-            <p className="text-[11px] font-mono mt-1 px-2 py-1 rounded-lg inline-block"
-              style={{ background: C.muted, color: C.mutedFg }}>
+
+            <p className="font-black text-lg" style={{ color: C.fg }}>
+              Payment Complete
+            </p>
+
+            <p
+              className="text-[11px] font-mono mt-1 px-2 py-1 rounded-lg inline-block"
+              style={{
+                background: C.muted,
+                color: C.mutedFg,
+              }}
+            >
               {snap?.displayId ?? String(lastTxn)}
             </p>
-            <p className="text-xs mt-2" style={{ color: C.mutedFg }}>Saved locally · syncs when online</p>
+
+            <p className="text-xs mt-2" style={{ color: C.mutedFg }}>
+              Saved locally · syncs when online
+            </p>
+
+            {printCount > 0 && (
+              <div
+                className="inline-flex items-center gap-1.5 mt-3 px-3 py-1.5 rounded-full text-[11px] font-black"
+                style={{
+                  background: "rgba(3,105,161,0.08)",
+                  color: "#0369a1",
+                  border: "1px solid rgba(3,105,161,0.16)",
+                }}
+              >
+                <Printer size={11} />
+                Printed {printCount}×
+              </div>
+            )}
           </div>
- 
+
           {/* Line items */}
-          <div className="px-5 py-3 space-y-2 max-h-44 overflow-y-auto"
-            style={{ borderBottom: `1px solid ${C.muted}` }}>
+          <div
+            className="px-5 py-3 space-y-2 max-h-44 overflow-y-auto"
+            style={{ borderBottom: `1px solid ${C.muted}` }}
+          >
             {snapCart.map((item) => (
-              <div key={item.eventItemId} className="flex justify-between items-start gap-3">
+              <div
+                key={item.eventItemId}
+                className="flex justify-between items-start gap-3"
+              >
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-bold truncate" style={{ color: C.fg }}>
+                  <p
+                    className="text-xs font-bold truncate"
+                    style={{ color: C.fg }}
+                  >
                     {item.productName}
-                    {item.variantCode && <span style={{ color: C.mutedFg }}> ({item.variantCode})</span>}
+                    {item.variantCode && (
+                      <span style={{ color: C.mutedFg }}>
+                        {" "}
+                        ({item.variantCode})
+                      </span>
+                    )}
                   </p>
+
                   <p className="text-xs font-mono" style={{ color: C.mutedFg }}>
                     {money(item.finalPrice)} × {item.quantity}
                   </p>
+
                   {item.promoApplied && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full mt-0.5"
-                      style={{ background: "rgba(69,46,90,0.1)", color: C.mid }}>
-                      <Tag size={8} />{item.promoApplied}
+                    <span
+                      className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full mt-0.5"
+                      style={{
+                        background: "rgba(69,46,90,0.1)",
+                        color: C.mid,
+                      }}
+                    >
+                      <Tag size={8} />
+                      {item.promoApplied}
                     </span>
                   )}
                 </div>
-                <p className="text-xs font-black font-mono flex-shrink-0" style={{ color: C.fg }}>
+
+                <p
+                  className="text-xs font-black font-mono flex-shrink-0"
+                  style={{ color: C.fg }}
+                >
                   {money(item.finalPrice * item.quantity)}
                 </p>
               </div>
             ))}
           </div>
- 
+
           {/* Totals */}
           <div className="px-5 py-4">
             <div className="flex items-center justify-between text-xs mb-2">
-              <span style={{ color: C.mutedFg }}>{snapQty} item{snapQty !== 1 ? "s" : ""}</span>
-              {snapDiscount > 0 && <span style={{ color: "#16a34a" }}>Saved {money(snapDiscount)}</span>}
+              <span style={{ color: C.mutedFg }}>
+                {snapQty} item{snapQty !== 1 ? "s" : ""}
+              </span>
+
+              {snapDiscount > 0 && (
+                <span style={{ color: "#16a34a" }}>
+                  Saved {money(snapDiscount)}
+                </span>
+              )}
             </div>
- 
+
             {/* Total paid block */}
-            <div className="rounded-2xl px-4 py-3 flex items-center justify-between"
-              style={{ background: C.muted, border: `1px solid ${C.border}` }}>
+            <div
+              className="rounded-2xl px-4 py-3 flex items-center justify-between"
+              style={{
+                background: C.muted,
+                border: `1px solid ${C.border}`,
+              }}
+            >
               <div>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: C.mutedFg }}>Total Paid</p>
+                <p
+                  className="text-[10px] font-black uppercase tracking-widest"
+                  style={{ color: C.mutedFg }}
+                >
+                  Total Paid
+                </p>
+
                 <p className="text-xs mt-0.5" style={{ color: C.mutedFg }}>
-                  via {snapPay?.name}{snapPay?.provider ? ` · ${snapPay.provider}` : ""}
+                  via {snapPay?.name}
+                  {snapPay?.provider ? ` · ${snapPay.provider}` : ""}
                 </p>
               </div>
-              <p className="text-3xl font-black" style={{ color: C.orange }}>{money(snapTotal)}</p>
+
+              <p className="text-3xl font-black" style={{ color: C.orange }}>
+                {money(snapTotal)}
+              </p>
             </div>
- 
-            {/* Cashier row — only when a session was active */}
+
+            {/* Cashier row */}
             {snapCashier && (
-              <div className="mt-2 flex items-center gap-2 px-3 py-2 rounded-xl"
-                style={{ background: C.muted, border: `1px solid ${C.border}` }}>
-                <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
-                  style={{ background: "rgba(69,46,90,0.1)", color: C.mid }}>
+              <div
+                className="mt-2 flex items-center gap-2 px-3 py-2 rounded-xl"
+                style={{
+                  background: C.muted,
+                  border: `1px solid ${C.border}`,
+                }}
+              >
+                <div
+                  className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
+                  style={{
+                    background: "rgba(69,46,90,0.1)",
+                    color: C.mid,
+                  }}
+                >
                   <User size={11} />
                 </div>
+
                 <div className="flex-1 min-w-0">
-                  <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: C.mutedFg }}>Cashier</p>
-                  <p className="text-xs font-bold truncate" style={{ color: C.fg }}>{snapCashier}</p>
+                  <p
+                    className="text-[10px] font-black uppercase tracking-widest"
+                    style={{ color: C.mutedFg }}
+                  >
+                    Cashier
+                  </p>
+
+                  <p
+                    className="text-xs font-bold truncate"
+                    style={{ color: C.fg }}
+                  >
+                    {snapCashier}
+                  </p>
                 </div>
               </div>
             )}
- 
+
             {/* Cash change section */}
             {snapCash != null && snapCash > 0 && (
-              <div className="mt-3 rounded-2xl px-4 py-3"
-                style={{ background: "rgba(3,105,161,0.05)", border: "1px solid rgba(3,105,161,0.15)" }}>
+              <div
+                className="mt-3 rounded-2xl px-4 py-3"
+                style={{
+                  background: "rgba(3,105,161,0.05)",
+                  border: "1px solid rgba(3,105,161,0.15)",
+                }}
+              >
                 <div className="flex justify-between text-xs mb-2">
                   <span style={{ color: C.mutedFg }}>Cash Tendered</span>
-                  <span className="font-mono font-bold" style={{ color: C.fg }}>{money(snapCash)}</span>
+
+                  <span className="font-mono font-bold" style={{ color: C.fg }}>
+                    {money(snapCash)}
+                  </span>
                 </div>
+
                 <div className="flex justify-between items-center">
-                  <span className="text-sm font-black" style={{ color: "#0369a1" }}>Change</span>
-                  <span className="text-2xl font-black" style={{ color: "#0369a1" }}>{money(snapChange ?? 0)}</span>
+                  <span className="text-sm font-black" style={{ color: "#0369a1" }}>
+                    Change
+                  </span>
+
+                  <span
+                    className="text-2xl font-black"
+                    style={{ color: "#0369a1" }}
+                  >
+                    {money(snapChange ?? 0)}
+                  </span>
                 </div>
               </div>
             )}
           </div>
- 
+
           {/* Actions */}
           <div className="px-5 pb-5 flex gap-2">
-            <button onClick={nextTransaction}
+            <button
+              onClick={nextTransaction}
               className="flex-1 rounded-2xl py-3.5 text-sm font-black transition-all hover:opacity-90"
-              style={{ background: C.orange, color: "white" }}>
+              style={{
+                background: C.orange,
+                color: "white",
+              }}
+            >
               Next Sale
             </button>
-            <button onClick={handlePrintSuccess} disabled={printing}
+
+            <button
+              onClick={handlePrintSuccess}
+              disabled={printing}
               className="px-5 rounded-2xl text-sm font-bold border flex items-center gap-1.5 disabled:opacity-40 transition-all hover:bg-gray-50"
-              style={{ borderColor: C.border, color: C.secFg, background: "white" }}>
+              style={{
+                borderColor: C.border,
+                color: C.secFg,
+                background: "white",
+              }}
+            >
               <Printer size={14} />
-              {printing ? "Printing…" : printCount > 0 ? `Print (${printCount}×)` : "Print"}
+              {printing
+                ? "Printing…"
+                : printCount > 0
+                  ? `Re-print #${printCount + 1}`
+                  : "Print"}
             </button>
           </div>
         </div>

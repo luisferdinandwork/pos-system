@@ -1,45 +1,73 @@
 // app/api/transactions/[id]/receipt-print/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { logCloudReceiptPrint } from "@/lib/receipt-print-server";
+import {
+  getTransactionReceiptPrintCount,
+  incrementTransactionReceiptPrintCount,
+} from "@/lib/transactions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(
-  req: NextRequest,
+export async function GET(
+  _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
     const transactionId = Number(id);
 
-    if (!Number.isFinite(transactionId)) {
+    if (!Number.isFinite(transactionId) || transactionId <= 0) {
       return NextResponse.json(
         { error: "Invalid transaction ID." },
         { status: 400 }
       );
     }
 
-    const body = await req.json().catch(() => ({}));
+    const result = await getTransactionReceiptPrintCount(transactionId);
 
-    const count = await logCloudReceiptPrint(transactionId, {
-      printType: body.printType ?? "reprint",
-      printedBy: body.printedBy ?? null,
-    });
-
-    return NextResponse.json({
-      transactionId,
-      count,
-    });
+    return NextResponse.json(result);
   } catch (error) {
-    console.error("[CloudReceiptPrintRoute] Failed:", error);
+    console.error("[CloudReceiptPrintRoute GET] Failed:", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Failed to update cloud receipt print count.",
+            : "Failed to load receipt print count.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const transactionId = Number(id);
+
+    if (!Number.isFinite(transactionId) || transactionId <= 0) {
+      return NextResponse.json(
+        { error: "Invalid transaction ID." },
+        { status: 400 }
+      );
+    }
+
+    const result = await incrementTransactionReceiptPrintCount(transactionId);
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("[CloudReceiptPrintRoute POST] Failed:", error);
+
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to update receipt print count.",
       },
       { status: 500 }
     );

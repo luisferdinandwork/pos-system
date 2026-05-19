@@ -1,4 +1,4 @@
-// app/(pos)/pos/history/page.tsx — REDESIGNED
+// app/(pos)/pos/history/page.tsx 
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
@@ -10,7 +10,7 @@ import {
   DollarSign, Tag, TrendingUp,
 } from "lucide-react";
 import { formatRupiah, formatDate } from "@/lib/utils";
-import { usePrintReceipt } from "@/lib/hooks/usePrintReceipt";
+import { usePrintReceipt, type EventReceiptTemplate } from "@/lib/hooks/usePrintReceipt";
 import { incrementLocalReceiptPrintCount } from "@/lib/receipt-print-counts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -76,6 +76,7 @@ function HistoryInner() {
   const [expanded,     setExpanded]     = useState<string | null>(null);
   const [loadingItems, setLoadingItems] = useState<string | null>(null);
   const [printCounts,  setPrintCounts]  = useState<Record<string, number>>({});
+  const [receiptTemplate, setReceiptTemplate] = useState<EventReceiptTemplate | null>(null);
 
   const [search,         setSearch]         = useState("");
   const [filterStatus,   setFilterStatus]   = useState("all");
@@ -88,7 +89,27 @@ function HistoryInner() {
 
   const { printReceipt, printing } = usePrintReceipt();
 
-  useEffect(() => { if (!eventId) { setLoading(false); return; } loadTxns(); }, [eventId]);
+  useEffect(() => {
+    if (!eventId) {
+      setLoading(false);
+      return;
+    }
+
+    loadTxns();
+    loadReceiptTemplate(eventId);
+  }, [eventId]);
+
+  async function loadReceiptTemplate(currentEventId: number) {
+    try {
+      const res = await fetch(`/api/events/${currentEventId}/receipt-template`, {
+        cache: "no-store",
+      });
+      const data = await res.json().catch(() => null);
+      setReceiptTemplate(res.ok ? data : null);
+    } catch {
+      setReceiptTemplate(null);
+    }
+  }
 
   async function loadPrintCountsForTxns(list: LocalTxn[]) {
     // Use receiptPrintCount stored directly in SQLite — same source the POS page uses.
@@ -142,17 +163,37 @@ function HistoryInner() {
   async function handlePrint(txn: LocalTxn) {
     const items = await fetchItems(txn.clientTxnId);
 
-    await printReceipt(txn, items);
+    const currentCount = Number(txn.receiptPrintCount ?? printCounts[txn.clientTxnId] ?? 0);
+    const nextPrintNumber = currentCount + 1;
 
-    // Same pattern as POS main page PaymentSuccessOverlay:
-    // incrementLocalReceiptPrintCount hits /api/local/transactions/[clientTxnId]/receipt-print
-    // which increments SQLite and syncs to Neon if serverTransactionId exists.
-    const result    = await incrementLocalReceiptPrintCount(txn.clientTxnId);
-    const nextCount = typeof result === "number"
-      ? result
-      : (result as any)?.receiptPrintCount ?? (Number(txn.receiptPrintCount ?? 0) + 1);
+    await printReceipt(txn, items, {
+      template: receiptTemplate,
+      eventName: receiptTemplate?.storeName ?? null,
+      printNumber: nextPrintNumber,
+    });
 
-    setPrintCounts(p => ({ ...p, [txn.clientTxnId]: nextCount }));
+    const result = await incrementLocalReceiptPrintCount(txn.clientTxnId);
+
+    const nextCount =
+      typeof result === "number"
+        ? result
+        : Number((result as any)?.receiptPrintCount ?? nextPrintNumber);
+
+    setPrintCounts((prev) => ({
+      ...prev,
+      [txn.clientTxnId]: nextCount,
+    }));
+
+    setTxns((prev) =>
+      prev.map((row) =>
+        row.clientTxnId === txn.clientTxnId
+          ? {
+              ...row,
+              receiptPrintCount: nextCount,
+            }
+          : row
+      )
+    );
   }
 
   const allMethods = useMemo(()=>[...new Set(txns.map(t=>t.paymentMethod).filter(Boolean))].sort(),[txns]);

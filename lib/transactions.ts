@@ -205,19 +205,89 @@ export async function incrementReceiptPrintCount(transactionId: number, by = 1) 
   return updated;
 }
 
-export async function setReceiptPrintCountAtLeast(transactionId: number, count: number) {
-  const safeCount = toPositiveInt(count);
+export async function getTransactionReceiptPrintCount(transactionId: number) {
+  const [row] = await db
+    .select({
+      transactionId: transactions.id,
+      receiptPrintCount: transactions.receiptPrintCount,
+    })
+    .from(transactions)
+    .where(eq(transactions.id, transactionId))
+    .limit(1);
+
+  if (!row) {
+    throw new Error("Transaction not found.");
+  }
+
+  return {
+    transactionId: row.transactionId,
+    receiptPrintCount: Number(row.receiptPrintCount ?? 0),
+  };
+}
+
+export async function incrementTransactionReceiptPrintCount(
+  transactionId: number
+) {
+  const [updated] = await db
+    .update(transactions)
+    .set({
+      receiptPrintCount: sql`${transactions.receiptPrintCount} + 1`,
+    })
+    .where(eq(transactions.id, transactionId))
+    .returning({
+      transactionId: transactions.id,
+      receiptPrintCount: transactions.receiptPrintCount,
+    });
+
+  if (!updated) {
+    throw new Error("Transaction not found.");
+  }
+
+  return {
+    transactionId: updated.transactionId,
+    receiptPrintCount: Number(updated.receiptPrintCount ?? 0),
+  };
+}
+
+export async function setReceiptPrintCountAtLeast(
+  transactionId: number,
+  printCount: number
+) {
+  const safeCount = Math.max(0, Math.trunc(Number(printCount) || 0));
 
   const [updated] = await db
     .update(transactions)
     .set({
       receiptPrintCount: sql`greatest(${transactions.receiptPrintCount}, ${safeCount})`,
-      updatedAt: new Date(),
     })
     .where(eq(transactions.id, transactionId))
-    .returning();
+    .returning({
+      transactionId: transactions.id,
+      receiptPrintCount: transactions.receiptPrintCount,
+    });
 
-  return updated;
+  if (!updated) {
+    throw new Error("Transaction not found.");
+  }
+
+  return {
+    transactionId: updated.transactionId,
+    receiptPrintCount: Number(updated.receiptPrintCount ?? 0),
+  };
+}
+
+export async function getTransactionReceiptPrintCountsByEvent(eventId: number) {
+  const rows = await db
+    .select({
+      id: transactions.id,
+      receiptPrintCount: transactions.receiptPrintCount,
+    })
+    .from(transactions)
+    .where(eq(transactions.eventId, eventId));
+
+  return Object.fromEntries(
+    rows.map((row) => [row.id, Number(row.receiptPrintCount ?? 0)])
+  );
 }
 
 export async function syncOfflineTransactions(payloads: CheckoutPayload[]) {

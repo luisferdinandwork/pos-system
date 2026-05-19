@@ -1,6 +1,5 @@
 // app/api/local/events/[id]/receipt-print-counts/sync/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { syncLocalReceiptPrintCountsToNeon } from "@/lib/local-pos";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,18 +12,20 @@ export async function POST(
     const { id } = await params;
     const eventId = Number(id);
 
-    if (!Number.isFinite(eventId)) {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
       return NextResponse.json(
         { error: "Invalid event ID." },
         { status: 400 }
       );
     }
 
+    const { syncLocalReceiptPrintCountsToNeon } = await import("@/lib/local-pos");
+
     const result = await syncLocalReceiptPrintCountsToNeon(eventId);
 
     return NextResponse.json(result);
   } catch (error) {
-    console.error("[LocalReceiptPrintCountSyncRoute] Failed:", error);
+    console.error("[LocalReceiptPrintSyncRoute] Failed:", error);
 
     return NextResponse.json(
       {

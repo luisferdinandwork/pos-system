@@ -1,6 +1,10 @@
 // lib/receipt-print-counts.ts
 // Shared client helpers for receipt print counts.
 //
+// Single source of truth:
+// - Local/offline POS: local SQLite local_transactions.receipt_print_count
+// - Cloud/synced transactions: Neon transactions.receipt_print_count
+//
 // Local/offline POS transactions:
 //   POST /api/local/transactions/[clientTxnId]/receipt-print
 //
@@ -8,7 +12,24 @@
 //   GET  /api/transactions/[id]/receipt-print
 //   POST /api/transactions/[id]/receipt-print
 //
-// The localStorage functions are kept only as fallback for old local counts.
+// LocalStorage is only kept as a fallback for old browser-side counts.
+
+export type LocalReceiptPrintResult = {
+  clientTxnId: string;
+  serverTransactionId: number | null;
+  receiptPrintCount: number;
+  cloudSync?: {
+    transactionId: number;
+    receiptPrintCount: number;
+  } | null;
+};
+
+export type CloudReceiptPrintResult = {
+  transactionId: number;
+  receiptPrintCount: number;
+};
+
+export type ReceiptPrintCountsMap = Record<string, number>;
 
 export function localReceiptPrintCountKey(clientTxnId: string) {
   return `receipt-print-count:${clientTxnId}`;
@@ -21,8 +42,8 @@ export function getLocalReceiptPrintCountFallback(clientTxnId: string): number {
     localReceiptPrintCountKey(clientTxnId)
   );
 
-  const n = Number(raw ?? 0);
-  return Number.isFinite(n) ? n : 0;
+  const count = Number(raw ?? 0);
+  return Number.isFinite(count) ? count : 0;
 }
 
 export function setLocalReceiptPrintCountFallback(
@@ -37,24 +58,19 @@ export function setLocalReceiptPrintCountFallback(
   );
 }
 
-/**
- * Backward-compatible alias.
- * Existing UI can still call getLocalReceiptPrintCount().
- */
+/** Backward-compatible alias for older UI code. */
 export function getLocalReceiptPrintCount(clientTxnId: string): number {
   return getLocalReceiptPrintCountFallback(clientTxnId);
 }
 
-/**
- * Backward-compatible alias.
- */
+/** Backward-compatible alias for older UI code. */
 export function setLocalReceiptPrintCount(clientTxnId: string, count: number) {
   setLocalReceiptPrintCountFallback(clientTxnId, count);
 }
 
 /**
- * Fallback only. The preferred method is incrementLocalReceiptPrintCount(),
- * which writes to local SQLite via API.
+ * Fallback only. Preferred path is incrementLocalReceiptPrintCount(),
+ * which writes to local SQLite and optionally syncs to Neon.
  */
 export function incrementLocalReceiptPrintCountFallback(
   clientTxnId: string
@@ -64,88 +80,158 @@ export function incrementLocalReceiptPrintCountFallback(
   return next;
 }
 
+async function readJson(response: Response) {
+  return response.json().catch(() => null);
+}
+
+function readError(data: unknown, fallback: string) {
+  if (
+    data &&
+    typeof data === "object" &&
+    "error" in data &&
+    typeof data.error === "string"
+  ) {
+    return data.error;
+  }
+
+  return fallback;
+}
+
 /**
  * Preferred local POS print count increment.
- * This writes into local SQLite local_transactions.receipt_print_count.
- * If the transaction is already synced, the server helper also syncs the count
- * into Neon receipt_print_logs.
+ * Writes into local SQLite local_transactions.receipt_print_count.
+ * If the transaction is already synced, the server also updates Neon using
+ * setReceiptPrintCountAtLeast() so cloud count never goes backward.
  */
 export async function incrementLocalReceiptPrintCount(
   clientTxnId: string
-): Promise<number> {
-  const res = await fetch(
+): Promise<LocalReceiptPrintResult> {
+  const fallbackBefore = getLocalReceiptPrintCountFallback(clientTxnId);
+
+  const response = await fetch(
     `/api/local/transactions/${encodeURIComponent(clientTxnId)}/receipt-print`,
-    {
-      method: "POST",
-    }
+    { method: "POST" }
   );
 
-  const data = await res.json().catch(() => null);
+  const data = await readJson(response);
 
-  if (!res.ok) {
-    return incrementLocalReceiptPrintCountFallback(clientTxnId);
+  if (!response.ok) {
+    const fallbackCount = incrementLocalReceiptPrintCountFallback(clientTxnId);
+
+    return {
+      clientTxnId,
+      serverTransactionId: null,
+      receiptPrintCount: Math.max(fallbackBefore + 1, fallbackCount),
+      cloudSync: null,
+    };
   }
 
-  const next = Number(data?.receiptPrintCount ?? 0);
+  const nextCount = Number(data?.receiptPrintCount ?? 0);
+  const safeCount = Number.isFinite(nextCount)
+    ? nextCount
+    : incrementLocalReceiptPrintCountFallback(clientTxnId);
 
-  if (Number.isFinite(next)) {
-    setLocalReceiptPrintCountFallback(clientTxnId, next);
-    return next;
-  }
+  setLocalReceiptPrintCountFallback(clientTxnId, safeCount);
 
-  return incrementLocalReceiptPrintCountFallback(clientTxnId);
+  return {
+    clientTxnId: String(data?.clientTxnId ?? clientTxnId),
+    serverTransactionId:
+      data?.serverTransactionId != null ? Number(data.serverTransactionId) : null,
+    receiptPrintCount: safeCount,
+    cloudSync: data?.cloudSync ?? null,
+  };
 }
 
 export async function fetchCloudReceiptPrintCount(
   transactionId: number
 ): Promise<number> {
-  const res = await fetch(`/api/transactions/${transactionId}/receipt-print`, {
+  const response = await fetch(`/api/transactions/${transactionId}/receipt-print`, {
     cache: "no-store",
   });
 
-  if (!res.ok) return 0;
+  const data = await readJson(response);
 
-  const data = await res.json().catch(() => null);
+  if (!response.ok) return 0;
 
-  return Number(data?.printCount ?? data?.count ?? 0);
+  return Number(
+    data?.receiptPrintCount ??
+      data?.printCount ??
+      data?.count ??
+      0
+  );
 }
 
-export async function logCloudReceiptPrint(
-  transactionId: number,
-  printedBy?: string | null
-): Promise<number> {
-  const current = await fetchCloudReceiptPrintCount(transactionId);
-
-  const res = await fetch(`/api/transactions/${transactionId}/receipt-print`, {
+export async function incrementCloudReceiptPrintCount(
+  transactionId: number
+): Promise<CloudReceiptPrintResult> {
+  const response = await fetch(`/api/transactions/${transactionId}/receipt-print`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      printType: current > 0 ? "reprint" : "original",
-      printedBy: printedBy ?? null,
-    }),
+    headers: { "Content-Type": "application/json" },
   });
 
-  if (!res.ok) return current;
+  const data = await readJson(response);
 
-  const data = await res.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(readError(data, "Failed to update receipt print count."));
+  }
 
-  return Number(data?.printCount ?? data?.count ?? current + 1);
+  return {
+    transactionId: Number(data?.transactionId ?? transactionId),
+    receiptPrintCount: Number(
+      data?.receiptPrintCount ??
+        data?.printCount ??
+        data?.count ??
+        0
+    ),
+  };
+}
+
+/**
+ * Backward-compatible alias for existing TransactionsTab code.
+ */
+export async function logCloudReceiptPrint(
+  transactionId: number,
+  _printedBy?: string | null
+): Promise<number> {
+  const result = await incrementCloudReceiptPrintCount(transactionId);
+  return result.receiptPrintCount;
+}
+
+export async function fetchEventReceiptPrintCounts(
+  eventId: number
+): Promise<Record<number, number>> {
+  const response = await fetch(`/api/events/${eventId}/transactions/print-counts`, {
+    cache: "no-store",
+  });
+
+  const data = await readJson(response);
+
+  if (!response.ok) {
+    throw new Error(readError(data, "Failed to load receipt print counts."));
+  }
+
+  const raw = data?.counts ?? {};
+  const mapped: Record<number, number> = {};
+
+  for (const [transactionId, count] of Object.entries(raw)) {
+    mapped[Number(transactionId)] = Number(count ?? 0);
+  }
+
+  return mapped;
 }
 
 export async function syncLocalReceiptPrintCounts(eventId: number) {
-  const res = await fetch(
+  const response = await fetch(
     `/api/local/events/${eventId}/receipt-print-counts/sync`,
-    {
-      method: "POST",
-    }
+    { method: "POST" }
   );
 
-  const data = await res.json().catch(() => null);
+  const data = await readJson(response);
 
-  if (!res.ok) {
-    throw new Error(data?.error ?? "Failed to sync local receipt print counts.");
+  if (!response.ok) {
+    throw new Error(
+      readError(data, "Failed to sync local receipt print counts.")
+    );
   }
 
   return data;

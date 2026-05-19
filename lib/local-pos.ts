@@ -573,7 +573,7 @@ export async function incrementLocalReceiptPrintCount(clientTxnId: string) {
     );
 
     cloudSync = {
-      transactionId: updated.id,
+      transactionId: updated.transactionId,
       localPrintCount: nextCount,
       cloudBefore: Number(updated.receiptPrintCount ?? 0),
       inserted: 0,

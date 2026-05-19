@@ -3,6 +3,10 @@
 // and event transaction pages.
 //
 // Supports per-event receipt CMS/settings through EventReceiptTemplate.
+// Supports re-print marker:
+//   first print  -> no marker
+//   second print -> RE-PRINTED #2
+//   third print  -> RE-PRINTED #3
 
 import { useState } from "react";
 import { formatRupiah, formatDate } from "@/lib/utils";
@@ -59,6 +63,13 @@ export type PrintReceiptOptions = {
   template?: EventReceiptTemplate | null;
   eventName?: string | null;
   cashierName?: string | null;
+
+  /**
+   * The number of the receipt print being generated.
+   * 1 = original receipt, so no re-print marker is shown.
+   * 2+ = shown as RE-PRINTED #2, RE-PRINTED #3, etc.
+   */
+  printNumber?: number | null;
 };
 
 function escapeHtml(value: unknown): string {
@@ -79,6 +90,11 @@ function receiptId(txn: PrintTxn) {
   return (txn.displayId || txn.clientTxnId || txn.id || "").toString();
 }
 
+function normalizePrintNumber(value: unknown): number {
+  const n = Math.trunc(Number(value ?? 1));
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
 // ── Receipt HTML builder ──────────────────────────────────────────────────────
 
 export function buildReceiptHtml(
@@ -96,6 +112,9 @@ export function buildReceiptHtml(
   const eventName = options.eventName ?? txn.eventName ?? null;
   const cashierName = options.cashierName ?? txn.cashierName ?? null;
 
+  const printNumber = normalizePrintNumber(options.printNumber);
+  const isReprint = printNumber > 1;
+
   const storeName = template?.storeName || eventName || "RECEIPT";
   const headline = template?.headline ?? null;
   const footerText = template?.footerText ?? "Terima kasih!";
@@ -106,20 +125,49 @@ export function buildReceiptHtml(
   const showPaymentReference = template?.showPaymentReference ?? true;
   const showDiscountBreakdown = template?.showDiscountBreakdown ?? true;
 
-  const cashTendered = txn.cashTendered != null ? safeNumber(txn.cashTendered) : null;
-  const changeAmount = txn.changeAmount != null ? safeNumber(txn.changeAmount) : null;
+  const cashTendered =
+    txn.cashTendered != null ? safeNumber(txn.cashTendered) : null;
+  const changeAmount =
+    txn.changeAmount != null ? safeNumber(txn.changeAmount) : null;
+
+  const reprintBadge = isReprint
+    ? `
+      <div class="reprint-badge">
+        RE-PRINTED #${escapeHtml(printNumber)}
+      </div>
+    `
+    : "";
 
   const lineRows = items
     .map((it) => {
       const lineTotal = safeNumber(it.finalPrice) * safeNumber(it.quantity);
       const lineDiscount = safeNumber(it.discountAmt) * safeNumber(it.quantity);
+
       return `
       <tr>
         <td style="padding:5px 0;font-size:12px;vertical-align:top">
           <strong>${escapeHtml(it.productName)}</strong>
-          ${showItemSku && it.itemId ? `<br/><span style="font-size:10px;color:#777">${escapeHtml(it.itemId)}</span>` : ""}
-          ${it.promoApplied ? `<br/><em style="font-size:10px;color:#777">${escapeHtml(it.promoApplied)}</em>` : ""}
-          ${showDiscountBreakdown && lineDiscount > 0 ? `<br/><span style="font-size:10px;color:#16a34a">Disc ${formatRupiah(lineDiscount)}</span>` : ""}
+          ${
+            showItemSku && it.itemId
+              ? `<br/><span style="font-size:10px;color:#777">${escapeHtml(
+                  it.itemId
+                )}</span>`
+              : ""
+          }
+          ${
+            it.promoApplied
+              ? `<br/><em style="font-size:10px;color:#777">${escapeHtml(
+                  it.promoApplied
+                )}</em>`
+              : ""
+          }
+          ${
+            showDiscountBreakdown && lineDiscount > 0
+              ? `<br/><span style="font-size:10px;color:#16a34a">Disc ${formatRupiah(
+                  lineDiscount
+                )}</span>`
+              : ""
+          }
         </td>
         <td style="padding:5px 0;font-size:11px;color:#666;text-align:center;vertical-align:top;white-space:nowrap">
           ×${safeNumber(it.quantity)}
@@ -136,11 +184,15 @@ export function buildReceiptHtml(
       ? `
     <tr>
       <td colspan="2" style="font-size:12px;color:#555;padding-top:4px">Subtotal</td>
-      <td style="text-align:right;font-size:12px;color:#555;padding-top:4px">${formatRupiah(subtotal)}</td>
+      <td style="text-align:right;font-size:12px;color:#555;padding-top:4px">${formatRupiah(
+        subtotal
+      )}</td>
     </tr>
     <tr>
       <td colspan="2" style="font-size:12px;color:#16a34a">Diskon</td>
-      <td style="text-align:right;font-size:12px;color:#16a34a">-${formatRupiah(disc)}</td>
+      <td style="text-align:right;font-size:12px;color:#16a34a">-${formatRupiah(
+        disc
+      )}</td>
     </tr>`
       : "";
 
@@ -149,11 +201,15 @@ export function buildReceiptHtml(
       ? `
     <tr>
       <td colspan="2" style="font-size:11px;color:#555;padding-top:6px">Tunai Diterima</td>
-      <td style="text-align:right;font-size:11px;color:#555;padding-top:6px">${formatRupiah(cashTendered)}</td>
+      <td style="text-align:right;font-size:11px;color:#555;padding-top:6px">${formatRupiah(
+        cashTendered
+      )}</td>
     </tr>
     <tr>
       <td colspan="2" style="font-size:12px;font-weight:bold;color:#0369a1">Kembalian</td>
-      <td style="text-align:right;font-size:12px;font-weight:bold;color:#0369a1">${formatRupiah(changeAmount ?? 0)}</td>
+      <td style="text-align:right;font-size:12px;font-weight:bold;color:#0369a1">${formatRupiah(
+        changeAmount ?? 0
+      )}</td>
     </tr>`
       : "";
 
@@ -164,34 +220,123 @@ export function buildReceiptHtml(
   <title>Receipt ${escapeHtml(txnNo)}</title>
   <style>
     *  { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Courier New',Courier,monospace; width:300px; margin:0 auto; padding:16px 8px; color:#111; }
+    body {
+      font-family:'Courier New',Courier,monospace;
+      width:300px;
+      margin:0 auto;
+      padding:16px 8px;
+      color:#111;
+    }
     .c  { text-align:center; }
     hr  { border:none; border-top:1px dashed #bbb; margin:8px 0; }
     table { width:100%; border-collapse:collapse; }
-    img.logo { max-width:90px; max-height:60px; object-fit:contain; margin:0 auto 6px; display:block; }
-    @media print { @page { margin:4mm; } body { width:100%; } }
+    img.logo {
+      max-width:90px;
+      max-height:60px;
+      object-fit:contain;
+      margin:0 auto 6px;
+      display:block;
+    }
+    .reprint-badge {
+      margin: 7px auto 0;
+      display: inline-block;
+      border: 1px dashed #111;
+      padding: 3px 7px;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: .5px;
+      text-align: center;
+    }
+    @media print {
+      @page { margin:4mm; }
+      body { width:100%; }
+    }
     ${template?.customCss ?? ""}
   </style>
 </head>
 <body>
   <div class="c" style="margin-bottom:8px">
-    ${template?.logoUrl ? `<img class="logo" src="${escapeHtml(template.logoUrl)}"/>` : ""}
-    <div style="font-size:17px;font-weight:bold;letter-spacing:1px">${escapeHtml(storeName)}</div>
-    ${headline ? `<div style="font-size:11px;color:#555;margin-top:2px">${escapeHtml(headline)}</div>` : ""}
-    ${template?.address ? `<div style="font-size:10px;color:#666;margin-top:2px">${escapeHtml(template.address)}</div>` : ""}
-    ${template?.phone ? `<div style="font-size:10px;color:#666;margin-top:1px">Telp: ${escapeHtml(template.phone)}</div>` : ""}
-    ${template?.instagram ? `<div style="font-size:10px;color:#666;margin-top:1px">${escapeHtml(template.instagram)}</div>` : ""}
-    ${template?.taxId ? `<div style="font-size:10px;color:#666;margin-top:1px">NPWP: ${escapeHtml(template.taxId)}</div>` : ""}
+    ${
+      template?.logoUrl
+        ? `<img class="logo" src="${escapeHtml(template.logoUrl)}"/>`
+        : ""
+    }
+    <div style="font-size:17px;font-weight:bold;letter-spacing:1px">${escapeHtml(
+      storeName
+    )}</div>
+    ${
+      headline
+        ? `<div style="font-size:11px;color:#555;margin-top:2px">${escapeHtml(
+            headline
+          )}</div>`
+        : ""
+    }
+    ${
+      template?.address
+        ? `<div style="font-size:10px;color:#666;margin-top:2px">${escapeHtml(
+            template.address
+          )}</div>`
+        : ""
+    }
+    ${
+      template?.phone
+        ? `<div style="font-size:10px;color:#666;margin-top:1px">Telp: ${escapeHtml(
+            template.phone
+          )}</div>`
+        : ""
+    }
+    ${
+      template?.instagram
+        ? `<div style="font-size:10px;color:#666;margin-top:1px">${escapeHtml(
+            template.instagram
+          )}</div>`
+        : ""
+    }
+    ${
+      template?.taxId
+        ? `<div style="font-size:10px;color:#666;margin-top:1px">NPWP: ${escapeHtml(
+            template.taxId
+          )}</div>`
+        : ""
+    }
+    ${reprintBadge}
   </div>
 
   <hr/>
 
   <table>
     <tbody>
-      ${showEventName && eventName ? `<tr><td style="font-size:10px;color:#666">Event</td><td style="font-size:10px;text-align:right">${escapeHtml(eventName)}</td></tr>` : ""}
-      <tr><td style="font-size:10px;color:#666">Tanggal</td><td style="font-size:10px;text-align:right">${escapeHtml(dateStr)}</td></tr>
-      ${txnNo ? `<tr><td style="font-size:10px;color:#666">No</td><td style="font-size:10px;text-align:right">#${escapeHtml(txnNo)}</td></tr>` : ""}
-      ${showCashierName && cashierName ? `<tr><td style="font-size:10px;color:#666">Kasir</td><td style="font-size:10px;text-align:right">${escapeHtml(cashierName)}</td></tr>` : ""}
+      ${
+        showEventName && eventName
+          ? `<tr><td style="font-size:10px;color:#666">Event</td><td style="font-size:10px;text-align:right">${escapeHtml(
+              eventName
+            )}</td></tr>`
+          : ""
+      }
+      <tr><td style="font-size:10px;color:#666">Tanggal</td><td style="font-size:10px;text-align:right">${escapeHtml(
+        dateStr
+      )}</td></tr>
+      ${
+        txnNo
+          ? `<tr><td style="font-size:10px;color:#666">No</td><td style="font-size:10px;text-align:right">#${escapeHtml(
+              txnNo
+            )}</td></tr>`
+          : ""
+      }
+      ${
+        isReprint
+          ? `<tr><td style="font-size:10px;color:#666">Status</td><td style="font-size:10px;text-align:right;font-weight:bold">RE-PRINT #${escapeHtml(
+              printNumber
+            )}</td></tr>`
+          : ""
+      }
+      ${
+        showCashierName && cashierName
+          ? `<tr><td style="font-size:10px;color:#666">Kasir</td><td style="font-size:10px;text-align:right">${escapeHtml(
+              cashierName
+            )}</td></tr>`
+          : ""
+      }
     </tbody>
   </table>
 
@@ -213,24 +358,44 @@ export function buildReceiptHtml(
       ${discRow}
       <tr>
         <td colspan="2" style="font-size:14px;font-weight:bold;padding-top:4px">TOTAL</td>
-        <td style="text-align:right;font-size:14px;font-weight:bold;padding-top:4px">${formatRupiah(total)}</td>
+        <td style="text-align:right;font-size:14px;font-weight:bold;padding-top:4px">${formatRupiah(
+          total
+        )}</td>
       </tr>
       <tr>
         <td colspan="2" style="font-size:11px;color:#666;padding-top:6px">Pembayaran</td>
         <td style="text-align:right;font-size:11px;color:#666;padding-top:6px">
           ${escapeHtml(txn.paymentMethod)}
-          ${showPaymentReference && txn.paymentReference ? `<br/>${escapeHtml(txn.paymentReference)}` : ""}
+          ${
+            showPaymentReference && txn.paymentReference
+              ? `<br/>${escapeHtml(txn.paymentReference)}`
+              : ""
+          }
         </td>
       </tr>
       ${cashRows}
     </tbody>
   </table>
 
-  ${template?.promoMessage ? `<hr/><div class="c" style="font-size:11px;color:#111;margin-top:6px">${escapeHtml(template.promoMessage)}</div>` : ""}
-  ${template?.returnPolicy ? `<hr/><div class="c" style="font-size:10px;color:#777;margin-top:6px">${escapeHtml(template.returnPolicy)}</div>` : ""}
+  ${
+    template?.promoMessage
+      ? `<hr/><div class="c" style="font-size:11px;color:#111;margin-top:6px">${escapeHtml(
+          template.promoMessage
+        )}</div>`
+      : ""
+  }
+  ${
+    template?.returnPolicy
+      ? `<hr/><div class="c" style="font-size:10px;color:#777;margin-top:6px">${escapeHtml(
+          template.returnPolicy
+        )}</div>`
+      : ""
+  }
 
   <hr/>
-  <div class="c" style="font-size:11px;color:#777;margin-top:6px">${escapeHtml(footerText)}</div>
+  <div class="c" style="font-size:11px;color:#777;margin-top:6px">${escapeHtml(
+    footerText
+  )}</div>
 </body>
 </html>`;
 }

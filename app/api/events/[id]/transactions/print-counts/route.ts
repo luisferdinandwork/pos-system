@@ -1,8 +1,6 @@
 // app/api/events/[id]/transactions/print-counts/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
-import { receiptPrintLogs, transactions } from "@/lib/db/schema";
-import { eq, inArray, sql } from "drizzle-orm";
+import { getTransactionReceiptPrintCountsByEvent } from "@/lib/transactions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,54 +13,18 @@ export async function GET(
     const { id } = await params;
     const eventId = Number(id);
 
-    if (!Number.isFinite(eventId)) {
+    if (!Number.isFinite(eventId) || eventId <= 0) {
       return NextResponse.json(
         { error: "Invalid event ID." },
         { status: 400 }
       );
     }
 
-    const txnRows = await db
-      .select({
-        id: transactions.id,
-      })
-      .from(transactions)
-      .where(eq(transactions.eventId, eventId));
+    const counts = await getTransactionReceiptPrintCountsByEvent(eventId);
 
-    const txnIds = txnRows.map((txn) => txn.id);
-
-    if (txnIds.length === 0) {
-      return NextResponse.json({
-        eventId,
-        counts: {},
-      });
-    }
-
-    const rows = await db
-      .select({
-        transactionId: receiptPrintLogs.transactionId,
-        count: sql<number>`count(${receiptPrintLogs.id})`,
-      })
-      .from(receiptPrintLogs)
-      .where(inArray(receiptPrintLogs.transactionId, txnIds))
-      .groupBy(receiptPrintLogs.transactionId);
-
-    const counts: Record<number, number> = {};
-
-    for (const txnId of txnIds) {
-      counts[txnId] = 0;
-    }
-
-    for (const row of rows) {
-      counts[Number(row.transactionId)] = Number(row.count ?? 0);
-    }
-
-    return NextResponse.json({
-      eventId,
-      counts,
-    });
+    return NextResponse.json({ counts });
   } catch (error) {
-    console.error("[EventTransactionPrintCountsRoute] Failed:", error);
+    console.error("[EventPrintCountsRoute] Failed:", error);
 
     return NextResponse.json(
       {

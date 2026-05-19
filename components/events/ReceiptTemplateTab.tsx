@@ -1,4 +1,4 @@
-// components/events/ReceiptTemplateTab.tsx — with live preview
+// components/events/ReceiptTemplateTab.tsx
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -18,11 +18,18 @@ const emptyTemplate: ReceiptTemplateRow = {
 };
 
 const DEMO_TXN = {
-  displayId: "20260500001", eventName: "Demo Event", cashierName: "Cashier Demo",
-  totalAmount: "650000", discount: "50000", finalAmount: "600000",
-  paymentMethod: "Cash", cashTendered: "650000", changeAmount: "50000",
+  displayId: "20260500001",
+  eventName: "Demo Event",
+  cashierName: "Cashier Demo",
+  totalAmount: "650000",
+  discount: "50000",
+  finalAmount: "600000",
+  paymentMethod: "Cash",
+  cashTendered: "650000",
+  changeAmount: "50000",
   createdAt: new Date().toISOString(),
 };
+
 const DEMO_ITEMS = [
   { itemId: "SPE1040100370", productName: "SKYRUNNER EVR (370)", quantity: 1, unitPrice: "500000", discountAmt: "50000", finalPrice: "450000", subtotal: "450000", promoApplied: "Seed Promo" },
   { itemId: "SPE2040092M", productName: "SRC RUN FAST TEE (M)", quantity: 1, unitPrice: "150000", discountAmt: "0", finalPrice: "150000", subtotal: "150000" },
@@ -77,7 +84,11 @@ export function ReceiptTemplateTab({ eventId, eventName }: { eventId: number; ev
     const html = buildReceiptHtml(
       { ...DEMO_TXN, eventName: form.storeName || eventName || "Demo Event" },
       DEMO_ITEMS,
-      { template: form, eventName: form.storeName || eventName }
+      {
+        template: form,
+        eventName: form.storeName || eventName,
+        printNumber: 2,
+      }
     );
     iframe.srcdoc = html;
   }, [form, eventName]);
