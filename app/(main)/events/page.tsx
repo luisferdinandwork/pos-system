@@ -4,16 +4,24 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  Plus,
+  AlertCircle,
+  ArrowRight,
+  Calendar as CalendarIcon,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Filter,
+  LayoutGrid,
+  List,
+  MapPin,
   Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
   Trash2,
   X,
-  Calendar as CalendarIcon,
-  MapPin,
-  ArrowRight,
-  Copy,
-  RefreshCw,
-  AlertCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -40,7 +48,9 @@ const STATUS_META = {
     color: "#dc2626",
     bg: "rgba(220,38,38,0.1)",
   },
-};
+} as const;
+
+type EventStatus = keyof typeof STATUS_META;
 
 type EventRow = {
   id: number;
@@ -74,6 +84,12 @@ type DuplicateForm = {
   startDate: string;
   endDate: string;
 };
+
+type StatusFilter = "active" | "draft" | "closed" | "all";
+type SortKey = "activeFirst" | "startAsc" | "startDesc" | "newest" | "nameAsc";
+type ViewMode = "cards" | "table";
+
+const PAGE_SIZE = 12;
 
 function emptyForm(): Form {
   return {
@@ -112,6 +128,18 @@ function ymdToDate(value: string | null | undefined): Date | undefined {
 function formatDateLabel(value: string | null | undefined): string {
   const date = ymdToDate(value);
 
+  if (!date) return "No date";
+
+  return date.toLocaleDateString("id-ID", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatDateButtonLabel(value: string | null | undefined): string {
+  const date = ymdToDate(value);
+
   if (!date) return "Select date";
 
   return date.toLocaleDateString("id-ID", {
@@ -119,6 +147,10 @@ function formatDateLabel(value: string | null | undefined): string {
     month: "short",
     year: "numeric",
   });
+}
+
+function getStatusMeta(status: string) {
+  return STATUS_META[status as EventStatus] ?? STATUS_META.draft;
 }
 
 function getApiError(result: unknown, fallback: string) {
@@ -147,6 +179,22 @@ function cleanFormPayload(form: Form) {
   };
 }
 
+function getEventDateTime(value: string | null | undefined) {
+  const date = ymdToDate(value);
+  return date ? date.getTime() : Number.POSITIVE_INFINITY;
+}
+
+function getEventUpdatedFallback(event: EventRow) {
+  return Number(event.id || 0);
+}
+
+function statusRank(status: string) {
+  if (status === "active") return 0;
+  if (status === "draft") return 1;
+  if (status === "closed") return 2;
+  return 3;
+}
+
 function DateField({
   label,
   value,
@@ -161,7 +209,7 @@ function DateField({
   return (
     <div>
       <label
-        className="block text-xs font-semibold uppercase tracking-wider mb-1"
+        className="mb-1 block text-xs font-semibold uppercase tracking-wider"
         style={{ color: "var(--muted-foreground)" }}
       >
         {label}
@@ -172,7 +220,7 @@ function DateField({
           <Button
             type="button"
             variant="outline"
-            className="w-full justify-start rounded-lg border px-3 py-2 text-sm font-normal"
+            className="w-full justify-start rounded-xl border px-3 py-2 text-sm font-normal"
             style={{
               borderColor: "var(--border)",
               color: value ? "var(--foreground)" : "var(--muted-foreground)",
@@ -180,7 +228,7 @@ function DateField({
             }}
           >
             <CalendarIcon size={15} className="mr-2" />
-            {formatDateLabel(value)}
+            {formatDateButtonLabel(value)}
           </Button>
         </PopoverTrigger>
 
@@ -192,7 +240,7 @@ function DateField({
           />
 
           {value && (
-            <div className="border-t p-2">
+            <div className="border-t p-2" style={{ borderColor: "var(--border)" }}>
               <Button
                 type="button"
                 variant="ghost"
@@ -210,6 +258,98 @@ function DateField({
   );
 }
 
+function StatusBadge({ status }: { status: string }) {
+  const meta = getStatusMeta(status);
+
+  return (
+    <span
+      className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold"
+      style={{
+        background: meta.bg,
+        color: meta.color,
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function EmptyState({
+  statusFilter,
+  search,
+  onCreate,
+  onReset,
+}: {
+  statusFilter: StatusFilter;
+  search: string;
+  onCreate: () => void;
+  onReset: () => void;
+}) {
+  const hasFilter = statusFilter !== "active" || search.trim();
+
+  return (
+    <div
+      className="rounded-3xl border p-10 text-center"
+      style={{
+        background: "var(--card)",
+        borderColor: "var(--border)",
+      }}
+    >
+      <div
+        className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl"
+        style={{
+          background: "rgba(255,101,63,0.10)",
+          color: "var(--brand-orange)",
+        }}
+      >
+        <CalendarIcon size={24} />
+      </div>
+
+      <h3 className="text-base font-bold" style={{ color: "var(--foreground)" }}>
+        {hasFilter ? "No events match your filter" : "No active events yet"}
+      </h3>
+
+      <p
+        className="mx-auto mt-1 max-w-md text-sm"
+        style={{ color: "var(--muted-foreground)" }}
+      >
+        {hasFilter
+          ? "Try changing the status, search keyword, or sorting option."
+          : "Create your first event or switch the filter to All Events to view older records."}
+      </p>
+
+      <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
+        {hasFilter && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded-xl border px-4 py-2 text-sm font-bold"
+            style={{
+              borderColor: "var(--border)",
+              color: "var(--foreground)",
+              background: "var(--card)",
+            }}
+          >
+            Reset filters
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={onCreate}
+          className="rounded-xl px-4 py-2 text-sm font-bold"
+          style={{
+            background: "var(--brand-orange)",
+            color: "white",
+          }}
+        >
+          Create Event
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function EventsPage() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [form, setForm] = useState<Form>(emptyForm());
@@ -218,73 +358,167 @@ export default function EventsPage() {
   const [duplicating, setDuplicating] = useState<number | null>(null);
   const [duplicateForm, setDuplicateForm] = useState<DuplicateForm | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  async function load() {
+  // Default page state: show active events first, not all events.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  const [sortBy, setSortBy] = useState<SortKey>("startAsc");
+  const [search, setSearch] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [page, setPage] = useState(1);
+
+  async function loadEvents() {
+    setLoading(true);
+    setPageError(null);
+
     try {
-      setPageError(null);
+      const res = await fetch("/api/events", { cache: "no-store" });
+      const data = await res.json();
 
-      const response = await fetch("/api/events", {
-        cache: "no-store",
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(getApiError(result, "Failed to load events"));
+      if (!res.ok) {
+        throw new Error(getApiError(data, "Failed to load events"));
       }
 
-      setEvents(Array.isArray(result) ? result : []);
+      const rows = Array.isArray(data) ? data : Array.isArray(data.events) ? data.events : [];
+      setEvents(rows);
     } catch (error) {
-      setPageError(
-        error instanceof Error ? error.message : "Failed to load events"
-      );
+      setPageError(error instanceof Error ? error.message : "Failed to load events");
       setEvents([]);
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    loadEvents();
   }, []);
 
-  function openCreateForm() {
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, sortBy, search]);
+
+  const stats = useMemo(() => {
+    return events.reduce(
+      (acc, event) => {
+        const status = event.status as EventStatus;
+
+        acc.total += 1;
+
+        if (status === "active") acc.active += 1;
+        else if (status === "draft") acc.draft += 1;
+        else if (status === "closed") acc.closed += 1;
+
+        return acc;
+      },
+      {
+        total: 0,
+        active: 0,
+        draft: 0,
+        closed: 0,
+      },
+    );
+  }, [events]);
+
+  const filteredEvents = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+
+    const rows = events.filter((event) => {
+      const matchStatus = statusFilter === "all" || event.status === statusFilter;
+
+      const matchKeyword =
+        !keyword ||
+        event.name.toLowerCase().includes(keyword) ||
+        event.code.toLowerCase().includes(keyword) ||
+        (event.location ?? "").toLowerCase().includes(keyword) ||
+        (event.description ?? "").toLowerCase().includes(keyword) ||
+        (event.verifierCode ?? "").toLowerCase().includes(keyword);
+
+      return matchStatus && matchKeyword;
+    });
+
+    rows.sort((a, b) => {
+      if (sortBy === "activeFirst") {
+        const statusCompare = statusRank(a.status) - statusRank(b.status);
+        if (statusCompare !== 0) return statusCompare;
+
+        return getEventDateTime(a.startDate) - getEventDateTime(b.startDate);
+      }
+
+      if (sortBy === "startAsc") {
+        const dateCompare = getEventDateTime(a.startDate) - getEventDateTime(b.startDate);
+        if (dateCompare !== 0) return dateCompare;
+
+        return a.name.localeCompare(b.name);
+      }
+
+      if (sortBy === "startDesc") {
+        const dateCompare = getEventDateTime(b.startDate) - getEventDateTime(a.startDate);
+        if (dateCompare !== 0) return dateCompare;
+
+        return a.name.localeCompare(b.name);
+      }
+
+      if (sortBy === "nameAsc") {
+        return a.name.localeCompare(b.name);
+      }
+
+      return getEventUpdatedFallback(b) - getEventUpdatedFallback(a);
+    });
+
+    return rows;
+  }, [events, search, sortBy, statusFilter]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredEvents.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const paginatedEvents = filteredEvents.slice(
+    (currentPage - 1) * PAGE_SIZE,
+    currentPage * PAGE_SIZE,
+  );
+
+  function startCreate() {
     setForm(emptyForm());
     setShowForm(true);
+    setDuplicateForm(null);
+    setPageError(null);
   }
 
-  function openEditForm(event: EventRow) {
+  function startEdit(event: EventRow) {
     setForm({
       id: event.id,
       code: event.code ?? "",
-      name: event.name,
+      name: event.name ?? "",
       location: event.location ?? "",
       description: event.description ?? "",
-      status: event.status,
+      status: event.status ?? "draft",
       startDate: event.startDate ? String(event.startDate).slice(0, 10) : "",
       endDate: event.endDate ? String(event.endDate).slice(0, 10) : "",
     });
 
     setShowForm(true);
+    setDuplicateForm(null);
+    setPageError(null);
   }
 
-  async function handleSave(event: React.FormEvent) {
-    event.preventDefault();
+  function closeForm() {
+    setShowForm(false);
+    setForm(emptyForm());
+  }
+
+  async function saveEvent(e: React.FormEvent) {
+    e.preventDefault();
 
     const payload = cleanFormPayload(form);
 
-    if (!/^\d{4}$/.test(payload.code)) {
-      alert("Event code must be exactly 4 digits.");
-      return;
-    }
-
-    if (!payload.name) {
-      alert("Event name is required.");
+    if (!payload.code || !payload.name) {
+      setPageError("Event code and event name are required.");
       return;
     }
 
     setSaving(true);
+    setPageError(null);
 
     try {
-      const response = await fetch("/api/events", {
+      const res = await fetch(form.id ? `/api/events/${form.id}` : "/api/events", {
         method: form.id ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
@@ -292,765 +526,1137 @@ export default function EventsPage() {
         body: JSON.stringify(payload),
       });
 
-      const result = await response.json();
+      const data = await res.json().catch(() => null);
 
-      if (!response.ok) {
-        throw new Error(
-          getApiError(
-            result,
-            form.id ? "Failed to update event" : "Failed to create event"
-          )
-        );
+      if (!res.ok) {
+        throw new Error(getApiError(data, "Failed to save event"));
       }
 
-      setShowForm(false);
-      setForm(emptyForm());
-      await load();
+      closeForm();
+      await loadEvents();
+
+      if (payload.status === "active") {
+        setStatusFilter("active");
+      }
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Failed to save event");
+      setPageError(error instanceof Error ? error.message : "Failed to save event");
     } finally {
       setSaving(false);
     }
   }
 
-  function openDuplicateForm(event: EventRow) {
+  function startDuplicate(event: EventRow) {
+    const today = dateToYmd(new Date());
+
     setDuplicateForm({
       sourceEvent: event,
-      code: "",
-      name: `${event.name} (Copy)`,
+      code: `${event.code}-COPY`,
+      name: `${event.name} Copy`,
       location: event.location ?? "",
       description: event.description ?? "",
-      startDate: "",
-      endDate: "",
+      startDate: event.startDate ? String(event.startDate).slice(0, 10) : today,
+      endDate: event.endDate ? String(event.endDate).slice(0, 10) : "",
     });
+
+    setShowForm(false);
+    setPageError(null);
   }
 
-  async function handleDuplicate(event: React.FormEvent) {
-    event.preventDefault();
+  async function duplicateEvent(e: React.FormEvent) {
+    e.preventDefault();
 
     if (!duplicateForm) return;
 
-    const code = duplicateForm.code.trim();
-
-    if (!/^\d{4}$/.test(code)) {
-      alert("New event code must be exactly 4 digits.");
+    if (!duplicateForm.code.trim() || !duplicateForm.name.trim()) {
+      setPageError("New event code and event name are required.");
       return;
     }
 
     setDuplicating(duplicateForm.sourceEvent.id);
+    setPageError(null);
 
     try {
-      const response = await fetch(
-        `/api/events/${duplicateForm.sourceEvent.id}/duplicate`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            code,
-            name: duplicateForm.name.trim(),
-            location: duplicateForm.location.trim() || null,
-            description: duplicateForm.description.trim() || null,
-            startDate: duplicateForm.startDate || null,
-            endDate: duplicateForm.endDate || null,
-          }),
-        }
-      );
+      const res = await fetch(`/api/events/${duplicateForm.sourceEvent.id}/duplicate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          code: duplicateForm.code.trim(),
+          name: duplicateForm.name.trim(),
+          location: duplicateForm.location.trim() || null,
+          description: duplicateForm.description.trim() || null,
+          startDate: duplicateForm.startDate || null,
+          endDate: duplicateForm.endDate || null,
+        }),
+      });
 
-      const result = await response.json();
+      const data = await res.json().catch(() => null);
 
-      if (!response.ok) {
-        throw new Error(getApiError(result, "Failed to duplicate event"));
+      if (!res.ok) {
+        throw new Error(getApiError(data, "Failed to duplicate event"));
       }
 
       setDuplicateForm(null);
-      await load();
-
-      if (result.event) {
-        openEditForm(result.event);
-      }
+      setStatusFilter("draft");
+      await loadEvents();
     } catch (error) {
-      alert(
-        error instanceof Error ? error.message : "Failed to duplicate event"
-      );
+      setPageError(error instanceof Error ? error.message : "Failed to duplicate event");
     } finally {
       setDuplicating(null);
     }
   }
 
-  async function deleteEventWithLocalCleanup(id: number) {
-    const ok = confirm(
-      "Delete this event? This will also remove its local POS data on this computer."
+  async function deleteEvent(event: EventRow) {
+    const confirmed = window.confirm(
+      `Delete event "${event.name}"?\n\nThis action cannot be undone.`,
     );
 
-    if (!ok) return;
+    if (!confirmed) return;
 
-    const response = await fetch(`/api/events?id=${id}`, {
-      method: "DELETE",
-    });
+    setPageError(null);
 
-    const result = await response.json();
+    try {
+      const res = await fetch(`/api/events/${event.id}`, {
+        method: "DELETE",
+      });
 
-    if (!response.ok) {
-      if (
-        response.status === 409 &&
-        result.code === "LOCAL_POS_HAS_UNSYNCED_SALES"
-      ) {
-        const force = confirm(
-          `${result.error}\n\nForce delete anyway? Unsynced local POS sales will be lost.`
-        );
+      const data = await res.json().catch(() => null);
 
-        if (!force) return;
-
-        const forceResponse = await fetch(
-          `/api/events?id=${id}&forceLocalDelete=true`,
-          {
-            method: "DELETE",
-          }
-        );
-
-        const forceResult = await forceResponse.json();
-
-        if (!forceResponse.ok) {
-          alert(forceResult.error || "Failed to delete event");
-          return;
-        }
-
-        await load();
-        return;
+      if (!res.ok) {
+        throw new Error(getApiError(data, "Failed to delete event"));
       }
 
-      alert(result.error || "Failed to delete event");
-      return;
+      await loadEvents();
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "Failed to delete event");
     }
-
-    await load();
   }
 
-  const cardStyle = {
-    background: "var(--card)",
-    borderColor: "var(--border)",
-  };
+  function resetFilters() {
+    setStatusFilter("active");
+    setSortBy("startAsc");
+    setSearch("");
+    setPage(1);
+  }
 
-  const inputClass =
-    "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1";
-
-  const inputStyle = {
-    borderColor: "var(--border)",
-    color: "var(--foreground)",
-    background: "var(--card)",
-  };
+  const statusOptions: Array<{
+    key: StatusFilter;
+    label: string;
+    count: number;
+  }> = [
+    { key: "active", label: "Active", count: stats.active },
+    { key: "draft", label: "Draft", count: stats.draft },
+    { key: "closed", label: "Closed", count: stats.closed },
+    { key: "all", label: "All", count: stats.total },
+  ];
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1
-            className="text-2xl font-bold"
-            style={{ color: "var(--foreground)" }}
-          >
-            Events
-          </h1>
-          <p
-            className="text-xs mt-0.5"
-            style={{ color: "var(--muted-foreground)" }}
-          >
-            {events.length} events total
-          </p>
+    <div className="space-y-6">
+      <div
+        className="rounded-3xl border p-5 md:p-6"
+        style={{
+          background: "var(--card)",
+          borderColor: "var(--border)",
+        }}
+      >
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <div
+                className="flex h-11 w-11 items-center justify-center rounded-2xl"
+                style={{
+                  background: "rgba(255,101,63,0.10)",
+                  color: "var(--brand-orange)",
+                }}
+              >
+                <CalendarIcon size={22} />
+              </div>
+
+              <div>
+                <p
+                  className="text-xs font-bold uppercase tracking-[0.22em]"
+                  style={{ color: "var(--muted-foreground)" }}
+                >
+                  Event Management
+                </p>
+
+                <h1
+                  className="text-2xl font-black tracking-tight"
+                  style={{ color: "var(--foreground)" }}
+                >
+                  Events
+                </h1>
+              </div>
+            </div>
+
+            <p
+              className="mt-3 max-w-2xl text-sm"
+              style={{ color: "var(--muted-foreground)" }}
+            >
+              Manage active POS events first. Use search, status tabs, sorting, and pagination
+              when your event list becomes large.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              onClick={loadEvents}
+              disabled={loading}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm font-bold disabled:opacity-50"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--foreground)",
+                background: "var(--card)",
+              }}
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+              Refresh
+            </button>
+
+            <button
+              type="button"
+              onClick={startCreate}
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-bold"
+              style={{
+                background: "var(--brand-orange)",
+                color: "white",
+              }}
+            >
+              <Plus size={16} />
+              New Event
+            </button>
+          </div>
         </div>
 
-        <button
-          onClick={openCreateForm}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold"
-          style={{
-            background: "var(--brand-orange)",
-            color: "white",
-          }}
-        >
-          <Plus size={15} />
-          New Event
-        </button>
+        <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <button
+            type="button"
+            onClick={() => setStatusFilter("active")}
+            className="rounded-2xl border p-4 text-left transition hover:shadow-sm"
+            style={{
+              borderColor: statusFilter === "active" ? "var(--brand-orange)" : "var(--border)",
+              background:
+                statusFilter === "active" ? "rgba(255,101,63,0.06)" : "var(--background)",
+            }}
+          >
+            <p className="text-xs font-bold uppercase tracking-wider" style={{ color: "#16a34a" }}>
+              Active
+            </p>
+            <p className="mt-1 text-2xl font-black" style={{ color: "var(--foreground)" }}>
+              {stats.active}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("draft")}
+            className="rounded-2xl border p-4 text-left transition hover:shadow-sm"
+            style={{
+              borderColor: statusFilter === "draft" ? "var(--brand-orange)" : "var(--border)",
+              background:
+                statusFilter === "draft" ? "rgba(255,101,63,0.06)" : "var(--background)",
+            }}
+          >
+            <p className="text-xs font-bold uppercase tracking-wider" style={{ color: "#6b7280" }}>
+              Draft
+            </p>
+            <p className="mt-1 text-2xl font-black" style={{ color: "var(--foreground)" }}>
+              {stats.draft}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("closed")}
+            className="rounded-2xl border p-4 text-left transition hover:shadow-sm"
+            style={{
+              borderColor: statusFilter === "closed" ? "var(--brand-orange)" : "var(--border)",
+              background:
+                statusFilter === "closed" ? "rgba(255,101,63,0.06)" : "var(--background)",
+            }}
+          >
+            <p className="text-xs font-bold uppercase tracking-wider" style={{ color: "#dc2626" }}>
+              Closed
+            </p>
+            <p className="mt-1 text-2xl font-black" style={{ color: "var(--foreground)" }}>
+              {stats.closed}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className="rounded-2xl border p-4 text-left transition hover:shadow-sm"
+            style={{
+              borderColor: statusFilter === "all" ? "var(--brand-orange)" : "var(--border)",
+              background:
+                statusFilter === "all" ? "rgba(255,101,63,0.06)" : "var(--background)",
+            }}
+          >
+            <p
+              className="text-xs font-bold uppercase tracking-wider"
+              style={{ color: "var(--muted-foreground)" }}
+            >
+              All Events
+            </p>
+            <p className="mt-1 text-2xl font-black" style={{ color: "var(--foreground)" }}>
+              {stats.total}
+            </p>
+          </button>
+        </div>
       </div>
 
       {pageError && (
         <div
-          className="rounded-xl border px-4 py-3 flex items-start gap-2 text-sm"
+          className="flex items-start gap-3 rounded-2xl border p-4"
           style={{
-            borderColor: "rgba(220,38,38,0.3)",
             background: "rgba(220,38,38,0.08)",
+            borderColor: "rgba(220,38,38,0.18)",
             color: "#dc2626",
           }}
         >
-          <AlertCircle size={16} className="mt-0.5" />
+          <AlertCircle size={18} className="mt-0.5 flex-shrink-0" />
           <div>
-            <p className="font-semibold">Failed to load events</p>
-            <p>{pageError}</p>
+            <p className="text-sm font-bold">Something went wrong</p>
+            <p className="text-sm">{pageError}</p>
           </div>
         </div>
       )}
 
       {showForm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center mb-0"
+        <form
+          onSubmit={saveEvent}
+          className="rounded-3xl border p-5 md:p-6"
           style={{
-            background: "rgba(30,16,78,0.3)",
-            backdropFilter: "blur(3px)",
+            background: "var(--card)",
+            borderColor: "var(--border)",
           }}
         >
-          <div
-            className="rounded-2xl border w-full max-w-xl shadow-2xl"
-            style={cardStyle}
-          >
-            <div
-              className="flex items-center justify-between px-6 py-4 border-b"
-              style={{ borderColor: "var(--border)" }}
-            >
-              <h2
-                className="font-bold"
-                style={{ color: "var(--foreground)" }}
-              >
-                {form.id ? "Edit Event" : "New Event"}
+          <div className="mb-5 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-black" style={{ color: "var(--foreground)" }}>
+                {form.id ? "Edit Event" : "Create Event"}
               </h2>
-
-              <button
-                onClick={() => setShowForm(false)}
-                className="p-1.5 rounded-lg"
-                style={{
-                  background: "var(--muted)",
-                  color: "var(--muted-foreground)",
-                }}
-              >
-                <X size={15} />
-              </button>
+              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+                Fill the event details. New events are saved as draft unless you choose active.
+              </p>
             </div>
 
-            <form onSubmit={handleSave} className="p-6 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-[140px_1fr] gap-3">
-                <div>
-                  <label
-                    className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    Event Code *
-                  </label>
-                  <input
-                    required
-                    inputMode="numeric"
-                    maxLength={4}
-                    value={form.code}
-                    onChange={(event) => {
-                      const code = event.target.value
-                        .replace(/\D/g, "")
-                        .slice(0, 4);
-
-                      setForm({ ...form, code });
-                    }}
-                    placeholder="1207"
-                    className={inputClass}
-                    style={inputStyle}
-                  />
-                  <p
-                    className="text-[11px] mt-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    Used in transaction ID.
-                  </p>
-                </div>
-
-                <div>
-                  <label
-                    className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    Event Name *
-                  </label>
-                  <input
-                    required
-                    value={form.name}
-                    onChange={(event) =>
-                      setForm({ ...form, name: event.target.value })
-                    }
-                    placeholder="e.g. Bazar Ramadan 2026"
-                    className={inputClass}
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label
-                  className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  Location
-                </label>
-                <input
-                  value={form.location}
-                  onChange={(event) =>
-                    setForm({ ...form, location: event.target.value })
-                  }
-                  placeholder="e.g. Mall Kelapa Gading Lt.2"
-                  className={inputClass}
-                  style={inputStyle}
-                />
-              </div>
-
-              <div>
-                <label
-                  className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  Description
-                </label>
-                <input
-                  value={form.description}
-                  onChange={(event) =>
-                    setForm({ ...form, description: event.target.value })
-                  }
-                  className={inputClass}
-                  style={inputStyle}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <DateField
-                  label="Start Date"
-                  value={form.startDate}
-                  onChange={(value) => setForm({ ...form, startDate: value })}
-                />
-
-                <DateField
-                  label="End Date"
-                  value={form.endDate}
-                  onChange={(value) => setForm({ ...form, endDate: value })}
-                />
-              </div>
-
-              <div>
-                <label
-                  className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  Status
-                </label>
-
-                <div className="grid grid-cols-3 gap-2">
-                  {Object.entries(STATUS_META).map(([value, meta]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setForm({ ...form, status: value })}
-                      className="rounded-xl border py-2 text-sm font-semibold transition-all"
-                      style={{
-                        borderColor:
-                          form.status === value
-                            ? meta.color
-                            : "var(--border)",
-                        background:
-                          form.status === value ? meta.bg : "transparent",
-                        color:
-                          form.status === value
-                            ? meta.color
-                            : "var(--muted-foreground)",
-                      }}
-                    >
-                      {meta.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="flex-1 rounded-xl py-2.5 text-sm font-bold disabled:opacity-60"
-                  style={{
-                    background: "var(--brand-orange)",
-                    color: "white",
-                  }}
-                >
-                  {saving ? "Saving…" : form.id ? "Update" : "Create Event"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowForm(false)}
-                  className="px-5 rounded-xl text-sm border font-medium"
-                  style={{
-                    borderColor: "var(--border)",
-                    color: "var(--muted-foreground)",
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
+            <button
+              type="button"
+              onClick={closeForm}
+              className="rounded-xl border p-2"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--muted-foreground)",
+              }}
+            >
+              <X size={17} />
+            </button>
           </div>
-        </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Event Code
+              </label>
+              <input
+                value={form.code}
+                onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value }))}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+                placeholder="EVT-001"
+              />
+            </div>
+
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Event Name
+              </label>
+              <input
+                value={form.name}
+                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+                placeholder="Jakarta Sneaker Expo"
+              />
+            </div>
+
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Location
+              </label>
+              <input
+                value={form.location}
+                onChange={(e) => setForm((prev) => ({ ...prev, location: e.target.value }))}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+                placeholder="Jakarta"
+              />
+            </div>
+
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Status
+              </label>
+              <select
+                value={form.status}
+                onChange={(e) => setForm((prev) => ({ ...prev, status: e.target.value }))}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+              >
+                <option value="draft">Draft</option>
+                <option value="active">Active</option>
+                <option value="closed">Closed</option>
+              </select>
+            </div>
+
+            <DateField
+              label="Start Date"
+              value={form.startDate}
+              onChange={(value) => setForm((prev) => ({ ...prev, startDate: value }))}
+            />
+
+            <DateField
+              label="End Date"
+              value={form.endDate}
+              onChange={(value) => setForm((prev) => ({ ...prev, endDate: value }))}
+            />
+
+            <div className="lg:col-span-2">
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Description
+              </label>
+              <textarea
+                value={form.description}
+                onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+                rows={3}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+                placeholder="Optional notes for this event"
+              />
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-col justify-end gap-2 sm:flex-row">
+            <button
+              type="button"
+              onClick={closeForm}
+              className="rounded-xl border px-4 py-2 text-sm font-bold"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--foreground)",
+                background: "var(--card)",
+              }}
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              disabled={saving}
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50"
+              style={{
+                background: "var(--brand-orange)",
+                color: "white",
+              }}
+            >
+              {saving ? <RefreshCw size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+              {saving ? "Saving..." : form.id ? "Save Changes" : "Create Event"}
+            </button>
+          </div>
+        </form>
       )}
 
       {duplicateForm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        <form
+          onSubmit={duplicateEvent}
+          className="rounded-3xl border p-5 md:p-6"
           style={{
-            background: "rgba(30,16,78,0.3)",
-            backdropFilter: "blur(3px)",
+            background: "var(--card)",
+            borderColor: "var(--border)",
           }}
         >
-          <div
-            className="rounded-2xl border w-full max-w-xl shadow-2xl"
-            style={cardStyle}
-          >
-            <div
-              className="flex items-center justify-between px-6 py-4 border-b"
-              style={{ borderColor: "var(--border)" }}
-            >
-              <h2
-                className="font-bold"
-                style={{ color: "var(--foreground)" }}
-              >
+          <div className="mb-5 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-black" style={{ color: "var(--foreground)" }}>
                 Duplicate Event
               </h2>
-
-              <button
-                onClick={() => setDuplicateForm(null)}
-                className="p-1.5 rounded-lg"
-                style={{
-                  background: "var(--muted)",
-                  color: "var(--muted-foreground)",
-                }}
-              >
-                <X size={15} />
-              </button>
+              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+                Create a new draft from “{duplicateForm.sourceEvent.name}”.
+              </p>
             </div>
 
-            <form onSubmit={handleDuplicate} className="p-6 space-y-4">
-              <p
-                className="text-sm"
+            <button
+              type="button"
+              onClick={() => setDuplicateForm(null)}
+              className="rounded-xl border p-2"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--muted-foreground)",
+              }}
+            >
+              <X size={17} />
+            </button>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
                 style={{ color: "var(--muted-foreground)" }}
               >
-                Duplicating{" "}
+                New Event Code
+              </label>
+              <input
+                value={duplicateForm.code}
+                onChange={(e) =>
+                  setDuplicateForm((prev) => (prev ? { ...prev, code: e.target.value } : prev))
+                }
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+              />
+            </div>
+
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                New Event Name
+              </label>
+              <input
+                value={duplicateForm.name}
+                onChange={(e) =>
+                  setDuplicateForm((prev) => (prev ? { ...prev, name: e.target.value } : prev))
+                }
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+              />
+            </div>
+
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Location
+              </label>
+              <input
+                value={duplicateForm.location}
+                onChange={(e) =>
+                  setDuplicateForm((prev) =>
+                    prev ? { ...prev, location: e.target.value } : prev,
+                  )
+                }
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+              />
+            </div>
+
+            <DateField
+              label="Start Date"
+              value={duplicateForm.startDate}
+              onChange={(value) =>
+                setDuplicateForm((prev) => (prev ? { ...prev, startDate: value } : prev))
+              }
+            />
+
+            <DateField
+              label="End Date"
+              value={duplicateForm.endDate}
+              onChange={(value) =>
+                setDuplicateForm((prev) => (prev ? { ...prev, endDate: value } : prev))
+              }
+            />
+
+            <div className="lg:col-span-2">
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wider"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                Description
+              </label>
+              <textarea
+                value={duplicateForm.description}
+                onChange={(e) =>
+                  setDuplicateForm((prev) =>
+                    prev ? { ...prev, description: e.target.value } : prev,
+                  )
+                }
+                rows={3}
+                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-col justify-end gap-2 sm:flex-row">
+            <button
+              type="button"
+              onClick={() => setDuplicateForm(null)}
+              className="rounded-xl border px-4 py-2 text-sm font-bold"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--foreground)",
+                background: "var(--card)",
+              }}
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              disabled={duplicating === duplicateForm.sourceEvent.id}
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50"
+              style={{
+                background: "var(--brand-orange)",
+                color: "white",
+              }}
+            >
+              {duplicating === duplicateForm.sourceEvent.id ? (
+                <RefreshCw size={15} className="animate-spin" />
+              ) : (
+                <Copy size={15} />
+              )}
+              {duplicating === duplicateForm.sourceEvent.id ? "Duplicating..." : "Duplicate Event"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div
+        className="sticky top-4 z-10 rounded-3xl border p-4 shadow-sm"
+        style={{
+          background: "var(--card)",
+          borderColor: "var(--border)",
+        }}
+      >
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap gap-2">
+            {statusOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => setStatusFilter(option.key)}
+                className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-bold"
+                style={{
+                  borderColor:
+                    statusFilter === option.key ? "var(--brand-orange)" : "var(--border)",
+                  color:
+                    statusFilter === option.key
+                      ? "var(--brand-orange)"
+                      : "var(--muted-foreground)",
+                  background:
+                    statusFilter === option.key ? "rgba(255,101,63,0.08)" : "var(--card)",
+                }}
+              >
+                <Filter size={14} />
+                {option.label}
                 <span
-                  className="font-semibold"
-                  style={{ color: "var(--foreground)" }}
+                  className="rounded-full px-2 py-0.5 text-[11px]"
+                  style={{
+                    background:
+                      statusFilter === option.key
+                        ? "rgba(255,101,63,0.12)"
+                        : "var(--background)",
+                    color:
+                      statusFilter === option.key
+                        ? "var(--brand-orange)"
+                        : "var(--muted-foreground)",
+                  }}
                 >
-                  {duplicateForm.sourceEvent.name}
+                  {option.count}
                 </span>
-                . Items and promos will be copied, stock will start from 0.
-              </p>
+              </button>
+            ))}
+          </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-[140px_1fr] gap-3">
-                <div>
-                  <label
-                    className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    New Code *
-                  </label>
-                  <input
-                    required
-                    inputMode="numeric"
-                    maxLength={4}
-                    value={duplicateForm.code}
-                    onChange={(event) => {
-                      const code = event.target.value
-                        .replace(/\D/g, "")
-                        .slice(0, 4);
-
-                      setDuplicateForm({ ...duplicateForm, code });
-                    }}
-                    placeholder="1208"
-                    className={inputClass}
-                    style={inputStyle}
-                  />
-                </div>
-
-                <div>
-                  <label
-                    className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    New Event Name *
-                  </label>
-                  <input
-                    required
-                    value={duplicateForm.name}
-                    onChange={(event) =>
-                      setDuplicateForm({
-                        ...duplicateForm,
-                        name: event.target.value,
-                      })
-                    }
-                    className={inputClass}
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label
-                  className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  Location
-                </label>
-                <input
-                  value={duplicateForm.location}
-                  onChange={(event) =>
-                    setDuplicateForm({
-                      ...duplicateForm,
-                      location: event.target.value,
-                    })
-                  }
-                  className={inputClass}
-                  style={inputStyle}
-                />
-              </div>
-
-              <div>
-                <label
-                  className="block text-xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  Description
-                </label>
-                <input
-                  value={duplicateForm.description}
-                  onChange={(event) =>
-                    setDuplicateForm({
-                      ...duplicateForm,
-                      description: event.target.value,
-                    })
-                  }
-                  className={inputClass}
-                  style={inputStyle}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <DateField
-                  label="Start Date"
-                  value={duplicateForm.startDate}
-                  onChange={(value) =>
-                    setDuplicateForm({
-                      ...duplicateForm,
-                      startDate: value,
-                    })
-                  }
-                />
-
-                <DateField
-                  label="End Date"
-                  value={duplicateForm.endDate}
-                  onChange={(value) =>
-                    setDuplicateForm({
-                      ...duplicateForm,
-                      endDate: value,
-                    })
-                  }
-                />
-              </div>
-
-              <div className="flex gap-2 pt-1">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+            <div
+              className="relative min-w-0 lg:w-72"
+            >
+              <Search
+                size={15}
+                className="absolute left-3 top-1/2 -translate-y-1/2"
+                style={{ color: "var(--muted-foreground)" }}
+              />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full rounded-xl border py-2 pl-9 pr-9 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--foreground)",
+                  background: "var(--input, var(--card))",
+                }}
+                placeholder="Search name, code, location..."
+              />
+              {search && (
                 <button
-                  type="submit"
-                  disabled={duplicating === duplicateForm.sourceEvent.id}
-                  className="flex-1 rounded-xl py-2.5 text-sm font-bold disabled:opacity-60"
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1"
+                  style={{ color: "var(--muted-foreground)" }}
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <div className="relative">
+                <SlidersHorizontal
+                  size={15}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2"
+                  style={{ color: "var(--muted-foreground)" }}
+                />
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortKey)}
+                  className="h-full rounded-xl border py-2 pl-9 pr-8 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-orange-400"
+                  style={{
+                    borderColor: "var(--border)",
+                    color: "var(--foreground)",
+                    background: "var(--input, var(--card))",
+                  }}
+                >
+                  <option value="startAsc">Start date ↑</option>
+                  <option value="startDesc">Start date ↓</option>
+                  <option value="activeFirst">Active first</option>
+                  <option value="newest">Newest created</option>
+                  <option value="nameAsc">Name A-Z</option>
+                </select>
+              </div>
+
+              <div className="flex rounded-xl border p-1" style={{ borderColor: "var(--border)" }}>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("cards")}
+                  className="rounded-lg p-2"
+                  style={{
+                    background: viewMode === "cards" ? "rgba(255,101,63,0.10)" : "transparent",
+                    color: viewMode === "cards" ? "var(--brand-orange)" : "var(--muted-foreground)",
+                  }}
+                >
+                  <LayoutGrid size={16} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("table")}
+                  className="rounded-lg p-2"
+                  style={{
+                    background: viewMode === "table" ? "rgba(255,101,63,0.10)" : "transparent",
+                    color: viewMode === "table" ? "var(--brand-orange)" : "var(--muted-foreground)",
+                  }}
+                >
+                  <List size={16} />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          className="mt-3 flex flex-col gap-2 border-t pt-3 text-xs sm:flex-row sm:items-center sm:justify-between"
+          style={{
+            borderColor: "var(--border)",
+            color: "var(--muted-foreground)",
+          }}
+        >
+          <span>
+            Showing <b style={{ color: "var(--foreground)" }}>{paginatedEvents.length}</b> of{" "}
+            <b style={{ color: "var(--foreground)" }}>{filteredEvents.length}</b> events
+            {statusFilter === "active" ? " · default active view" : ""}
+          </span>
+
+          {(statusFilter !== "active" || search || sortBy !== "startAsc") && (
+            <button
+              type="button"
+              onClick={resetFilters}
+              className="text-left text-xs font-bold"
+              style={{ color: "var(--brand-orange)" }}
+            >
+              Reset to active events
+            </button>
+          )}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div
+              key={index}
+              className="h-48 animate-pulse rounded-3xl border"
+              style={{
+                background: "var(--card)",
+                borderColor: "var(--border)",
+              }}
+            />
+          ))}
+        </div>
+      ) : filteredEvents.length === 0 ? (
+        <EmptyState
+          statusFilter={statusFilter}
+          search={search}
+          onCreate={startCreate}
+          onReset={resetFilters}
+        />
+      ) : viewMode === "cards" ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {paginatedEvents.map((event) => (
+            <div
+              key={event.id}
+              className="group rounded-3xl border p-5 transition hover:-translate-y-0.5 hover:shadow-sm"
+              style={{
+                background: "var(--card)",
+                borderColor: "var(--border)",
+              }}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <StatusBadge status={event.status} />
+                    <span
+                      className="rounded-full px-2.5 py-1 text-xs font-mono font-bold"
+                      style={{
+                        background: "var(--background)",
+                        color: "var(--muted-foreground)",
+                      }}
+                    >
+                      {event.code}
+                    </span>
+                  </div>
+
+                  <h3
+                    className="line-clamp-2 text-lg font-black leading-tight"
+                    style={{ color: "var(--foreground)" }}
+                  >
+                    {event.name}
+                  </h3>
+                </div>
+
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => startEdit(event)}
+                    className="rounded-xl border p-2 opacity-100 transition md:opacity-0 md:group-hover:opacity-100"
+                    style={{
+                      borderColor: "var(--border)",
+                      color: "var(--muted-foreground)",
+                    }}
+                  >
+                    <Pencil size={15} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => startDuplicate(event)}
+                    className="rounded-xl border p-2 opacity-100 transition md:opacity-0 md:group-hover:opacity-100"
+                    style={{
+                      borderColor: "var(--border)",
+                      color: "var(--muted-foreground)",
+                    }}
+                  >
+                    <Copy size={15} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div
+                  className="flex items-center gap-2 text-sm"
+                  style={{ color: "var(--muted-foreground)" }}
+                >
+                  <MapPin size={15} className="flex-shrink-0" />
+                  <span className="truncate">{event.location || "No location"}</span>
+                </div>
+
+                <div
+                  className="grid grid-cols-2 gap-2 rounded-2xl p-3 text-sm"
+                  style={{ background: "var(--background)" }}
+                >
+                  <div>
+                    <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                      Start
+                    </p>
+                    <p className="font-bold" style={{ color: "var(--foreground)" }}>
+                      {formatDateLabel(event.startDate)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                      End
+                    </p>
+                    <p className="font-bold" style={{ color: "var(--foreground)" }}>
+                      {formatDateLabel(event.endDate)}
+                    </p>
+                  </div>
+                </div>
+
+                {event.description && (
+                  <p
+                    className="line-clamp-2 text-sm"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    {event.description}
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-5 flex items-center gap-2 border-t pt-4" style={{ borderColor: "var(--border)" }}>
+                <Link
+                  href={`/events/${event.id}`}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-bold"
                   style={{
                     background: "var(--brand-orange)",
                     color: "white",
                   }}
                 >
-                  {duplicating === duplicateForm.sourceEvent.id
-                    ? "Duplicating…"
-                    : "Duplicate Event"}
-                </button>
+                  Manage
+                  <ArrowRight size={15} />
+                </Link>
 
                 <button
                   type="button"
-                  onClick={() => setDuplicateForm(null)}
-                  className="px-5 rounded-xl text-sm border font-medium"
+                  onClick={() => deleteEvent(event)}
+                  className="rounded-xl p-2.5"
                   style={{
-                    borderColor: "var(--border)",
-                    color: "var(--muted-foreground)",
+                    background: "rgba(220,38,38,0.10)",
+                    color: "#dc2626",
                   }}
                 >
-                  Cancel
+                  <Trash2 size={15} />
                 </button>
               </div>
-            </form>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div
+          className="overflow-hidden rounded-3xl border"
+          style={{
+            background: "var(--card)",
+            borderColor: "var(--border)",
+          }}
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[920px] text-sm">
+              <thead style={{ background: "var(--background)" }}>
+                <tr style={{ color: "var(--muted-foreground)" }}>
+                  <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider">
+                    Event
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider">
+                    Location
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider">
+                    Start
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider">
+                    End
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-bold uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y" style={{ borderColor: "var(--border)" }}>
+                {paginatedEvents.map((event) => (
+                  <tr key={event.id}>
+                    <td className="px-4 py-4">
+                      <div>
+                        <p className="font-black" style={{ color: "var(--foreground)" }}>
+                          {event.name}
+                        </p>
+                        <p
+                          className="mt-0.5 font-mono text-xs"
+                          style={{ color: "var(--muted-foreground)" }}
+                        >
+                          {event.code}
+                        </p>
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <StatusBadge status={event.status} />
+                    </td>
+
+                    <td className="px-4 py-4" style={{ color: "var(--muted-foreground)" }}>
+                      {event.location || "-"}
+                    </td>
+
+                    <td className="px-4 py-4 font-semibold" style={{ color: "var(--foreground)" }}>
+                      {formatDateLabel(event.startDate)}
+                    </td>
+
+                    <td className="px-4 py-4 font-semibold" style={{ color: "var(--foreground)" }}>
+                      {formatDateLabel(event.endDate)}
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <div className="flex justify-end gap-2">
+                        <Link
+                          href={`/events/${event.id}`}
+                          className="rounded-xl px-3 py-2 text-xs font-bold"
+                          style={{
+                            background: "var(--brand-orange)",
+                            color: "white",
+                          }}
+                        >
+                          Manage
+                        </Link>
+
+                        <button
+                          type="button"
+                          onClick={() => startEdit(event)}
+                          className="rounded-xl border p-2"
+                          style={{
+                            borderColor: "var(--border)",
+                            color: "var(--muted-foreground)",
+                          }}
+                        >
+                          <Pencil size={14} />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => startDuplicate(event)}
+                          className="rounded-xl border p-2"
+                          style={{
+                            borderColor: "var(--border)",
+                            color: "var(--muted-foreground)",
+                          }}
+                        >
+                          <Copy size={14} />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => deleteEvent(event)}
+                          className="rounded-xl p-2"
+                          style={{
+                            background: "rgba(220,38,38,0.10)",
+                            color: "#dc2626",
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {events.length === 0 ? (
-        <div className="rounded-2xl border py-16 text-center" style={cardStyle}>
-          <CalendarIcon
-            size={40}
-            className="mx-auto mb-3"
-            style={{
-              color: "var(--muted-foreground)",
-              opacity: 0.3,
-            }}
-          />
+      {filteredEvents.length > PAGE_SIZE && (
+        <div
+          className="flex flex-col items-center justify-between gap-3 rounded-2xl border p-3 sm:flex-row"
+          style={{
+            background: "var(--card)",
+            borderColor: "var(--border)",
+          }}
+        >
           <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-            No events yet. Create your first one.
+            Page{" "}
+            <b style={{ color: "var(--foreground)" }}>
+              {currentPage} / {pageCount}
+            </b>
           </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {events.map((event) => {
-            const meta =
-              STATUS_META[event.status as keyof typeof STATUS_META] ??
-              STATUS_META.draft;
 
-            const isDuplicating = duplicating === event.id;
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+              disabled={currentPage <= 1}
+              className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-bold disabled:opacity-40"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--foreground)",
+                background: "var(--card)",
+              }}
+            >
+              <ChevronLeft size={16} />
+              Previous
+            </button>
 
-            return (
-              <div
-                key={event.id}
-                className="rounded-2xl border overflow-hidden transition-all hover:shadow-md"
-                style={cardStyle}
-              >
-                <div className="px-5 py-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div
-                        className="inline-flex items-center rounded-lg px-2 py-0.5 text-[11px] font-bold mb-2"
-                        style={{
-                          background: "var(--muted)",
-                          color: "var(--muted-foreground)",
-                        }}
-                      >
-                        Code: {event.code}
-                      </div>
-
-                      <h3
-                        className="font-bold text-base leading-snug"
-                        style={{ color: "var(--foreground)" }}
-                      >
-                        {event.name}
-                      </h3>
-                    </div>
-
-                    <span
-                      className="text-xs px-2.5 py-1 rounded-full font-semibold flex-shrink-0"
-                      style={{
-                        background: meta.bg,
-                        color: meta.color,
-                      }}
-                    >
-                      {meta.label}
-                    </span>
-                  </div>
-
-                  {event.location && (
-                    <div className="flex items-center gap-1 mt-2">
-                      <MapPin
-                        size={12}
-                        style={{ color: "var(--muted-foreground)" }}
-                      />
-                      <span
-                        className="text-xs"
-                        style={{ color: "var(--muted-foreground)" }}
-                      >
-                        {event.location}
-                      </span>
-                    </div>
-                  )}
-
-                  {(event.startDate || event.endDate) && (
-                    <div className="flex items-center gap-1 mt-1">
-                      <CalendarIcon
-                        size={12}
-                        style={{ color: "var(--muted-foreground)" }}
-                      />
-                      <span
-                        className="text-xs"
-                        style={{ color: "var(--muted-foreground)" }}
-                      >
-                        {event.startDate
-                          ? formatDateLabel(event.startDate)
-                          : "?"}
-                        {" — "}
-                        {event.endDate ? formatDateLabel(event.endDate) : "?"}
-                      </span>
-                    </div>
-                  )}
-
-                  {event.description && (
-                    <p
-                      className="text-xs mt-2 line-clamp-2"
-                      style={{ color: "var(--muted-foreground)" }}
-                    >
-                      {event.description}
-                    </p>
-                  )}
-                </div>
-
-                <div
-                  className="flex items-center justify-between px-5 py-3"
-                  style={{ borderTop: "1px solid var(--border)" }}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => openEditForm(event)}
-                      className="p-2 rounded-lg"
-                      title="Edit event"
-                      style={{
-                        background: "rgba(255,200,92,0.15)",
-                        color: "#b45309",
-                      }}
-                    >
-                      <Pencil size={14} />
-                    </button>
-
-                    <button
-                      onClick={() => openDuplicateForm(event)}
-                      disabled={isDuplicating}
-                      className="p-2 rounded-lg disabled:opacity-50 transition-all"
-                      title="Duplicate event"
-                      style={{
-                        background: "rgba(3,105,161,0.1)",
-                        color: "#0369a1",
-                      }}
-                    >
-                      {isDuplicating ? (
-                        <RefreshCw size={14} className="animate-spin" />
-                      ) : (
-                        <Copy size={14} />
-                      )}
-                    </button>
-
-                    <button
-                      onClick={() => deleteEventWithLocalCleanup(event.id)}
-                      className="p-2 rounded-lg"
-                      title="Delete event"
-                      style={{
-                        background: "rgba(220,38,38,0.1)",
-                        color: "#dc2626",
-                      }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-
-                  <Link
-                    href={`/events/${event.id}`}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold"
-                    style={{
-                      background: "var(--brand-orange)",
-                      color: "white",
-                    }}
-                  >
-                    Manage <ArrowRight size={13} />
-                  </Link>
-                </div>
-              </div>
-            );
-          })}
+            <button
+              type="button"
+              onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
+              disabled={currentPage >= pageCount}
+              className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-bold disabled:opacity-40"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--foreground)",
+                background: "var(--card)",
+              }}
+            >
+              Next
+              <ChevronRight size={16} />
+            </button>
+          </div>
         </div>
       )}
     </div>

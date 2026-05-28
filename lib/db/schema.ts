@@ -12,7 +12,6 @@ import {
 } from "drizzle-orm/pg-core";
 
 // ── Events ────────────────────────────────────────────────────────────────────
-// ── Events ────────────────────────────────────────────────────────────────────
 export const events = pgTable(
   "events",
   {
@@ -363,3 +362,30 @@ export const authUsers = pgTable("auth_users", {
   isActive:     boolean("is_active").notNull().default(true),
   createdAt:    timestamp("created_at").defaultNow(),
 });
+
+// ── Auth User Event Assignments ───────────────────────────────────────────────
+// Many-to-many assignment table: one cashier can work on many events.
+// auth_users.event_id is kept as a legacy/default event fallback.
+export const authUserEvents = pgTable(
+  "auth_user_events",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    userEventUnique: uniqueIndex("auth_user_events_user_event_unique").on(
+      table.userId,
+      table.eventId
+    ),
+    userIdx: index("auth_user_events_user_idx").on(table.userId),
+    eventIdx: index("auth_user_events_event_idx").on(table.eventId),
+  })
+);
+

@@ -80,21 +80,51 @@ export function CashierSessionsTab({ eventId }: Props) {
   async function load() {
     setLoading(true);
     setError(null);
+
     try {
       const [sessionsRes, usersRes] = await Promise.all([
         fetch(`/api/events/${eventId}/cashier-sessions`, { cache: "no-store" }),
         fetch(`/api/events/${eventId}/users`, { cache: "no-store" }),
       ]);
-      const sessionsData = await sessionsRes.json();
-      const usersData    = await usersRes.json();
-      setSessions(Array.isArray(sessionsData) ? sessionsData : []);
-      setUsers(Array.isArray(usersData) ? usersData.filter((u: EventUser) => u.isActive) : []);
-    } catch {
-      setError("Failed to load sessions.");
+
+      const sessionsData = await sessionsRes.json().catch(() => []);
+      const usersData = await usersRes.json().catch(() => []);
+
+      if (!sessionsRes.ok) {
+        throw new Error(sessionsData?.error ?? "Failed to load sessions");
+      }
+
+      if (!usersRes.ok) {
+        throw new Error(usersData?.error ?? "Failed to load event users");
+      }
+
+      const normalizedSessions = Array.isArray(sessionsData)
+        ? sessionsData
+        : Array.isArray(sessionsData?.sessions)
+          ? sessionsData.sessions
+          : Array.isArray(sessionsData?.data)
+            ? sessionsData.data
+            : [];
+
+      const normalizedUsers = Array.isArray(usersData)
+        ? usersData
+        : Array.isArray(usersData?.users)
+          ? usersData.users
+          : Array.isArray(usersData?.data)
+            ? usersData.data
+            : [];
+
+      setSessions(normalizedSessions);
+      setUsers(normalizedUsers.filter((user: EventUser) => user.isActive));
+    } catch (err) {
+      setSessions([]);
+      setUsers([]);
+      setError(err instanceof Error ? err.message : "Failed to load sessions.");
     } finally {
       setLoading(false);
     }
   }
+
 
   useEffect(() => { load(); }, [eventId]);
 

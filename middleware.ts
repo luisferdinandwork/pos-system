@@ -12,6 +12,25 @@ function getEventIdFromCloudApi(pathname: string) {
   return match ? Number(match[1]) : null;
 }
 
+function normalizeEventIds(value: unknown, fallback?: unknown) {
+  const ids = Array.isArray(value) ? value : [];
+  const fallbackId =
+    fallback === null || fallback === undefined ? null : Number(fallback);
+
+  return [
+    ...new Set(
+      [...ids, fallbackId]
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    ),
+  ];
+}
+
+function getCashierHome(eventIds: number[]) {
+  if (eventIds.length === 1) return `/pos?event=${eventIds[0]}`;
+  return "/pos?select=1";
+}
+
 export default withAuth(
   function middleware(req) {
     const token = req.nextauth.token;
@@ -22,10 +41,12 @@ export default withAuth(
     }
 
     const role = String(token.role);
-    const assignedEventId =
-      token.eventId === null || token.eventId === undefined
-        ? null
-        : Number(token.eventId);
+    const assignedEventIds = normalizeEventIds(
+      (token as any).eventIds,
+      (token as any).eventId
+    );
+    const canAccessEvent = (eventId: number | null) =>
+      Boolean(eventId && assignedEventIds.includes(Number(eventId)));
 
     /**
      * Already logged in user should not stay on login.
@@ -35,11 +56,7 @@ export default withAuth(
         return NextResponse.redirect(new URL("/", req.url));
       }
 
-      if (assignedEventId) {
-        return NextResponse.redirect(
-          new URL(`/pos?event=${assignedEventId}`, req.url)
-        );
-      }
+      return NextResponse.redirect(new URL(getCashierHome(assignedEventIds), req.url));
     }
 
     /**
@@ -50,49 +67,62 @@ export default withAuth(
     }
 
     /**
-     * User must have assigned event.
+     * User must have at least one assigned event.
      */
-    if (!assignedEventId) {
+    if (assignedEventIds.length === 0) {
       return NextResponse.redirect(new URL("/login", req.url));
     }
 
     /**
-     * Normal user may only access POS.
+     * Normal users may not access dashboard/admin pages.
      */
     if (pathname === "/") {
-      return NextResponse.redirect(
-        new URL(`/pos?event=${assignedEventId}`, req.url)
-      );
+      return NextResponse.redirect(new URL(getCashierHome(assignedEventIds), req.url));
     }
 
     /**
      * POS route protection.
+     * Cashiers may open /pos, /pos?select=1, and assigned /pos?event=ID.
      */
     if (pathname.startsWith("/pos")) {
       const requestedEvent = searchParams.get("event");
 
       if (!requestedEvent) {
-        return NextResponse.redirect(
-          new URL(`/pos?event=${assignedEventId}`, req.url)
-        );
+        return NextResponse.next();
       }
 
-      if (Number(requestedEvent) !== assignedEventId) {
-        return NextResponse.redirect(
-          new URL(`/pos?event=${assignedEventId}`, req.url)
-        );
+      if (!canAccessEvent(Number(requestedEvent))) {
+        return NextResponse.redirect(new URL("/pos?select=1", req.url));
       }
 
       return NextResponse.next();
     }
 
     /**
-     * Allow assigned event user to access local SQLite POS APIs for their event only.
+     * POS event list for cashiers. The route itself returns only assigned events.
+     */
+    if (pathname === "/api/pos/events") {
+      return NextResponse.next();
+    }
+
+    /**
+     * Local POS helper APIs used by the selection page.
+     * Event-specific local APIs are checked below.
+     */
+    if (
+      pathname === "/api/local/prepared-events" ||
+      pathname === "/api/local/pos-state"
+    ) {
+      return NextResponse.next();
+    }
+
+    /**
+     * Allow assigned event user to access local SQLite POS APIs for assigned events only.
      */
     if (pathname.startsWith("/api/local/events")) {
       const apiEventId = getEventIdFromLocalApi(pathname);
 
-      if (apiEventId === assignedEventId) {
+      if (canAccessEvent(apiEventId)) {
         return NextResponse.next();
       }
 
@@ -100,13 +130,13 @@ export default withAuth(
     }
 
     /**
-     * Optional: allow event users to read only their assigned cloud event APIs.
-     * If you want POS users to be fully local-only, you can remove this block.
+     * Allow event users to read/use cloud event APIs only for assigned events.
+     * /api/events with no id remains admin-only; cashiers use /api/pos/events.
      */
     if (pathname.startsWith("/api/events")) {
       const apiEventId = getEventIdFromCloudApi(pathname);
 
-      if (apiEventId && apiEventId === assignedEventId) {
+      if (canAccessEvent(apiEventId)) {
         return NextResponse.next();
       }
 
@@ -114,11 +144,9 @@ export default withAuth(
     }
 
     /**
-     * Block all main admin pages and other APIs.
+     * Block all admin pages and other APIs.
      */
-    return NextResponse.redirect(
-      new URL(`/pos?event=${assignedEventId}`, req.url)
-    );
+    return NextResponse.redirect(new URL(getCashierHome(assignedEventIds), req.url));
   },
   {
     callbacks: {

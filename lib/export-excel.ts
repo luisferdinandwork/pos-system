@@ -20,6 +20,7 @@ import {
   cashDrawerCounts,
   receiptPrintLogs,
   authUsers,
+  authUserEvents,
 } from "@/lib/db/schema";
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -812,10 +813,12 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
       username: authUsers.username,
       role: authUsers.role,
       isActive: authUsers.isActive,
+      assignmentActive: authUserEvents.isActive,
       createdAt: authUsers.createdAt,
     })
-    .from(authUsers)
-    .where(eq(authUsers.eventId, eventId))
+    .from(authUserEvents)
+    .innerJoin(authUsers, eq(authUsers.id, authUserEvents.userId))
+    .where(eq(authUserEvents.eventId, eventId))
     .orderBy(authUsers.name);
 
   const promoRows = await db.select().from(promos).where(eq(promos.eventId, eventId)).orderBy(promos.name);

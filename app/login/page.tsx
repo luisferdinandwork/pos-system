@@ -6,6 +6,14 @@ import { signIn } from "next-auth/react";
 import { Lock, User, Zap } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+function normalizeEventIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((eventId) => Number(eventId))
+    .filter((eventId) => Number.isFinite(eventId) && eventId > 0);
+}
+
 export default function LoginPage() {
   const router = useRouter();
 
@@ -36,7 +44,7 @@ export default function LoginPage() {
     /**
      * Ask the server where this user should go.
      */
-    const me = await fetch("/api/auth/me").then((r) => r.json());
+    const me = await fetch("/api/auth/me", { cache: "no-store" }).then((r) => r.json());
 
     if (me.role === "admin") {
       router.push("/");
@@ -44,8 +52,10 @@ export default function LoginPage() {
       return;
     }
 
-    if (me.eventId) {
-      router.push(`/pos?event=${me.eventId}`);
+    const eventIds = normalizeEventIds(me.eventIds);
+
+    if (eventIds.length > 0) {
+      router.push("/pos?select=1");
       router.refresh();
       return;
     }
@@ -70,7 +80,7 @@ export default function LoginPage() {
           <h1 className="text-3xl font-black text-white">POS Login</h1>
 
           <p className="text-sm mt-2" style={{ color: "#9ca3af" }}>
-            Login to access your event POS system.
+            Login to access your assigned event POS system.
           </p>
         </div>
 

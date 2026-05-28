@@ -6,6 +6,7 @@ import {
   LayoutDashboard, Package, Wallet, CalendarDays,
   Receipt, Warehouse, ShoppingCart, Settings2, Zap,
   ChevronRight,
+  Users,
 } from "lucide-react";
 
 // ── Nav structure ─────────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ const SETUP_ITEMS = [
   { href: "/events",          label: "Events",          icon: CalendarDays    },
   { href: "/products",        label: "Products",        icon: Package         },
   { href: "/payment-methods", label: "Payment Methods", icon: Wallet          },
+  { href: "/users",           label: "Users",           icon: Users           },
 ] as const;
 
 // const LIVE_ITEMS = [

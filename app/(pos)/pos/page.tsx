@@ -47,9 +47,11 @@ type POSActionDialog = null | "turn-off-local" | "force-turn-off-local" | "delet
 type DailyStats = { txnCount: number; revenue: number; discount: number; itemsSold: number; todayTxnCount: number; todayRevenue: number; todayDiscount: number; todayItemsSold: number; totalUnits: number; totalItems: number; };
 type EdcGroup   = { machineId: number | null; machineLabel: string; methods: PayMethod[]; };
 type CurrentUser = {
+  id?: number;
   name: string;
   role: string;   // "admin" | "user"
   eventId?: number | null;
+  eventIds?: number[];
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -109,6 +111,31 @@ function makeClientTxnId(eventCodeOrId: string | number) {
     clientTxnId: `LOCAL-EV${eventCodeOrId}-${random}`,
     displayId: null as string | null,
   };
+}
+
+function normalizeEventIds(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((row) => Number(row))
+    .filter((row) => Number.isFinite(row) && row > 0);
+}
+
+function sortActiveEventsFirst(rows: EventRow[]) {
+  return [...rows].sort((a, b) => {
+    const statusRank = (status: string) =>
+      status === "active" ? 0 : status === "draft" ? 1 : status === "closed" ? 2 : 3;
+
+    const rankDiff = statusRank(a.status) - statusRank(b.status);
+    if (rankDiff !== 0) return rankDiff;
+
+    const aTime = a.startDate ? new Date(a.startDate).getTime() : Number.MAX_SAFE_INTEGER;
+    const bTime = b.startDate ? new Date(b.startDate).getTime() : Number.MAX_SAFE_INTEGER;
+
+    if (aTime !== bTime) return aTime - bTime;
+
+    return a.name.localeCompare(b.name);
+  });
 }
 
 // ── Promo engine (unchanged logic) ───────────────────────────────────────────
@@ -179,14 +206,22 @@ function POSInner() {
   const { data: authSession } = useSession();
   const currentUser: CurrentUser | null = authSession?.user
     ? {
-        name:    (authSession.user as any).name    ?? "",
-        role:    (authSession.user as any).role    ?? "user",
-        eventId: (authSession.user as any).eventId ?? null,
+        id:       (authSession.user as any).id,
+        name:     (authSession.user as any).name     ?? "",
+        role:     (authSession.user as any).role     ?? "user",
+        eventId:  (authSession.user as any).eventId  ?? null,
+        eventIds: normalizeEventIds((authSession.user as any).eventIds),
       }
     : null;
  
   const isAdmin    = currentUser?.role === "admin";
   const isCashier  = currentUser?.role === "user";
+  const assignedEventIds = useMemo(
+    () => normalizeEventIds(currentUser?.eventIds),
+    [currentUser?.eventIds]
+  );
+  const canAccessEvent = (eventId: number) =>
+    isAdmin || assignedEventIds.includes(Number(eventId));
 
   // ── Event select search/filter state ─────────────────────────────────────
   const [eventSearch,       setEventSearch]       = useState("");
@@ -255,6 +290,15 @@ function POSInner() {
     try { const d = await fetch("/api/local/prepared-events",{cache:"no-store"}).then(r=>r.json()); setPreparedEvents(Array.isArray(d.events)?d.events:[]); } catch { setPreparedEvents([]); }
   }
 
+  async function loadEventsForCurrentUser() {
+    const url = isAdmin ? "/api/events" : "/api/pos/events";
+    const data = await fetch(url, { cache: "no-store" }).then((r) => r.json());
+    const rows = Array.isArray(data) ? data : Array.isArray(data.events) ? data.events : [];
+    const sorted = sortActiveEventsFirst(rows as EventRow[]);
+    setEvents(sorted);
+    return sorted;
+  }
+
   async function getReceiptTemplateForPrint() {
     if (lastTxnSnapshot?.receiptTemplate) {
       return lastTxnSnapshot.receiptTemplate;
@@ -317,6 +361,11 @@ function POSInner() {
     try { const res=await fetch(`/api/local/events/${eventId}/prepare`,{method:"POST"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); localStorage.setItem("pos:last-event-id",String(eventId)); applyBundle(d.bundle as LocalBundle); setLocalReady(true); flash("Event prepared for offline POS"); return d.bundle as LocalBundle; } catch(e) { flash(e instanceof Error?e.message:"Failed.",true); return null; } finally { setPreparing(false); }
   }
   async function openLocalEvent(ev: EventRow) {
+    if (!canAccessEvent(ev.id)) {
+      flash("You are not assigned to this event.", true);
+      return;
+    }
+
     localStorage.setItem("pos:last-event-id",String(ev.id));
     const local = await loadLocalBundle(ev.id);
     if (local) { setScreen("sell"); return; }
@@ -571,18 +620,70 @@ function POSInner() {
   },[]);
   useEffect(()=>{ if (!online||!event?.id||pendingSyncCount===0||syncing) return; const t=setTimeout(()=>syncLocalTransactions(event.id),1500); return ()=>clearTimeout(t); },[online,event?.id,pendingSyncCount]);
   useEffect(()=>{
+    if (!authSession?.user) return;
+
     async function boot() {
       await loadPreparedEvents();
-      if (forceSelect) { setScreen("event-select"); try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch {} return; }
-      if (queryEventId) { const local=await loadLocalBundle(queryEventId); if (local){localStorage.setItem("pos:last-event-id",String(queryEventId));setScreen("sell");return;} if (navigator.onLine) { try { const evs=await fetch("/api/events",{cache:"no-store"}).then(r=>r.json()); setEvents(evs); const t=evs.find((ev:EventRow)=>ev.id===queryEventId); if(t){await openLocalEvent(t);return;} } catch { flash("Could not prepare selected event.",true); } } flash("Selected event is not prepared locally.",true); setScreen("event-select"); return; }
+
+      if (!isAdmin && assignedEventIds.length === 0) {
+        setEvents([]);
+        setScreen("event-select");
+        flash("This cashier is not assigned to any event.", true);
+        return;
+      }
+
+      if (forceSelect) {
+        setScreen("event-select");
+        if (navigator.onLine) {
+          try { await loadEventsForCurrentUser(); } catch {}
+        }
+        return;
+      }
+
+      if (queryEventId) {
+        if (!canAccessEvent(queryEventId)) {
+          router.replace("/pos?select=1");
+          setScreen("event-select");
+          if (navigator.onLine) {
+            try { await loadEventsForCurrentUser(); } catch {}
+          }
+          flash("You are not assigned to that event.", true);
+          return;
+        }
+
+        const local=await loadLocalBundle(queryEventId);
+        if (local){localStorage.setItem("pos:last-event-id",String(queryEventId));setScreen("sell");return;}
+        if (navigator.onLine) {
+          try {
+            const evs=await loadEventsForCurrentUser();
+            const t=evs.find((ev:EventRow)=>ev.id===queryEventId);
+            if(t){await openLocalEvent(t);return;}
+          } catch { flash("Could not prepare selected event.",true); }
+        }
+        flash("Selected event is not prepared locally.",true);
+        setScreen("event-select");
+        return;
+      }
+
       const saved=localStorage.getItem("pos:last-event-id");
-      if (saved&&Number.isFinite(Number(saved))){const l=await loadLocalBundle(Number(saved));if(l){setScreen("sell");return;}}
-      try { const state=await fetch("/api/local/pos-state",{cache:"no-store"}).then(r=>r.json()); if(state?.event?.id){const l=await loadLocalBundle(Number(state.event.id));if(l){localStorage.setItem("pos:last-event-id",String(state.event.id));setScreen("sell");return;}} } catch {}
-      try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch { flash("Offline. No prepared POS event found.",true); }
+      if (saved&&Number.isFinite(Number(saved))&&canAccessEvent(Number(saved))){
+        const l=await loadLocalBundle(Number(saved));
+        if(l){setScreen("sell");return;}
+      }
+
+      try {
+        const state=await fetch("/api/local/pos-state",{cache:"no-store"}).then(r=>r.json());
+        if(state?.event?.id && canAccessEvent(Number(state.event.id))){
+          const l=await loadLocalBundle(Number(state.event.id));
+          if(l){localStorage.setItem("pos:last-event-id",String(state.event.id));setScreen("sell");return;}
+        }
+      } catch {}
+
+      try { await loadEventsForCurrentUser(); } catch { flash("Offline. No prepared POS event found.",true); }
       setScreen("event-select");
     }
     boot();
-  },[]);
+  },[authSession?.user, forceSelect, queryEventId, isAdmin, assignedEventIds.join(",")]);
   useEffect(()=>{ if (!query.trim()){setSuggestions([]);return;} const q=query.toLowerCase(); setSuggestions(items.filter(it=>it.itemId.toLowerCase().includes(q)||it.name.toLowerCase().includes(q)||(it.variantCode??"").toLowerCase().includes(q)||(it.color??"").toLowerCase().includes(q)).slice(0,24)); },[query,items]);
   useEffect(()=>{ setCashTendered(""); },[payMethod]);
 
@@ -1223,11 +1324,18 @@ function POSInner() {
   // ── Event select screen ───────────────────────────────────────────────────
   if (screen==="event-select") {
     // Merge prepared + cloud events, deduplicate by id, apply search + status filter
-    const allEventIds = new Set(preparedEvents.map(e=>e.id));
-    const cloudOnly   = events.filter(e=>!allEventIds.has(e.id));
+    const allowedPreparedEvents = isAdmin
+      ? preparedEvents
+      : preparedEvents.filter((ev) => assignedEventIds.includes(Number(ev.id)));
+    const allowedEvents = isAdmin
+      ? events
+      : events.filter((ev) => assignedEventIds.includes(Number(ev.id)));
+
+    const allEventIds = new Set(allowedPreparedEvents.map(e=>e.id));
+    const cloudOnly   = allowedEvents.filter(e=>!allEventIds.has(e.id));
 
     const esq = eventSearch.trim().toLowerCase();
-    const filteredPrepared = preparedEvents.filter(ev=>{
+    const filteredPrepared = allowedPreparedEvents.filter(ev=>{
       if (eventStatusFilter!=="all" && ev.status!==eventStatusFilter) return false;
       if (esq && !ev.name.toLowerCase().includes(esq) && !(ev.location??"").toLowerCase().includes(esq)) return false;
       return true;
@@ -1238,7 +1346,7 @@ function POSInner() {
       return true;
     });
     const totalVisible = filteredPrepared.length + filteredCloud.length;
-    const totalAll     = preparedEvents.length + cloudOnly.length;
+    const totalAll     = allowedPreparedEvents.length + cloudOnly.length;
     const hasFilter    = esq || eventStatusFilter!=="all";
 
     const STATUS_FILTERS: { value: "all"|"active"|"draft"|"closed"; label: string }[] = [
@@ -1257,12 +1365,14 @@ function POSInner() {
         <div className="flex-shrink-0" style={{ background:C.deep }}>
           {/* Top row: back + branding + status + dashboard */}
           <div className="px-4 py-3 flex items-center gap-3">
-            <button onClick={()=>window.location.href="/"}
-              className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all hover:bg-white/10"
-              style={{ border:"1px solid rgba(255,255,255,0.15)", color:"rgba(255,255,255,0.7)" }}
-              title="Back to dashboard">
-              <ArrowLeft size={15}/>
-            </button>
+            {isAdmin && (
+              <button onClick={()=>window.location.href="/"}
+                className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all hover:bg-white/10"
+                style={{ border:"1px solid rgba(255,255,255,0.15)", color:"rgba(255,255,255,0.7)" }}
+                title="Back to dashboard">
+                <ArrowLeft size={15}/>
+              </button>
+            )}
             <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background:C.orange }}>
               <Zap size={16} strokeWidth={2.5} style={{ color:"white" }}/>
             </div>
@@ -1278,12 +1388,21 @@ function POSInner() {
               {online?<Wifi size={11}/>:<WifiOff size={11}/>}
               <span className="hidden sm:inline">{online?"Online":"Offline"}</span>
             </div>
-            {/* Dashboard link — always visible in header */}
-            <button onClick={()=>window.location.href="/"}
-              className="hidden sm:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg flex-shrink-0 transition-all hover:bg-white/10"
-              style={{ color:"rgba(255,255,255,0.55)", border:"1px solid rgba(255,255,255,0.1)" }}>
-              <LogOut size={12}/>Dashboard
-            </button>
+            {/* Dashboard link — admin only */}
+            {isAdmin ? (
+              <button onClick={()=>window.location.href="/"}
+                className="hidden sm:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg flex-shrink-0 transition-all hover:bg-white/10"
+                style={{ color:"rgba(255,255,255,0.55)", border:"1px solid rgba(255,255,255,0.1)" }}>
+                <LogOut size={12}/>Dashboard
+              </button>
+            ) : (
+              <button
+                onClick={() => signOut({ callbackUrl: "/login" })}
+                className="hidden sm:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg flex-shrink-0 transition-all hover:bg-red-500/20"
+                style={{ color:"rgba(248,113,113,0.85)", border:"1px solid rgba(248,113,113,0.16)" }}>
+                <LogOut size={12}/>Log Out
+              </button>
+            )}
           </div>
 
           {/* Search + filter row */}
@@ -1526,13 +1645,14 @@ function POSInner() {
             {preparing?<RefreshCw size={13} className="animate-spin"/>:<Database size={13}/>}
             <span className="hidden sm:inline topbar-label">Refresh</span>
           </button>
-          {/* Switch event — admin only */}
-          {isAdmin && (
+          {/* Switch event */}
+          {(isAdmin || isCashier) && (
             <button onClick={async ()=>{
                 setCart([]); setPayMethod(null); setReference(""); setCashTendered(""); setQuery("");
                 setEventSearch(""); setEventStatusFilter("active");
                 await loadPreparedEvents();
-                if (navigator.onLine) { try { setEvents(await fetch("/api/events",{cache:"no-store"}).then(r=>r.json())); } catch {} }
+                if (navigator.onLine) { try { await loadEventsForCurrentUser(); } catch {} }
+                router.replace("/pos?select=1");
                 setScreen("event-select");
               }}
               className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all hover:bg-white/10"
