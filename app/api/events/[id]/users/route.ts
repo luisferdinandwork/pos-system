@@ -1,142 +1,207 @@
 // app/api/events/[id]/users/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import {
-  assignUserToEvent,
-  createAuthUser,
-  getAssignableUsersForEvent,
   getEventUsers,
+  getAssignableUsersForEvent,
+  createAuthUser,
+  assignUserToEvent,
   setEventUserAssignmentActive,
   unassignUserFromEvent,
 } from "@/lib/auth-users";
 
-function parseId(value: unknown) {
-  const id = Number(value);
-  return Number.isInteger(id) && id > 0 ? id : null;
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 /**
- * Compatible response behavior:
- *
- * 1. Cashier/session pages:
- *    GET /api/events/[id]/users
- *    -> returns EventUser[]
- *
- * 2. Event detail Users tab:
- *    GET /api/events/[id]/users?includeAvailable=true
- *    -> returns { users: EventUser[], availableUsers: EventUser[] }
+ * Defense in depth: middleware already scopes non-admins to their assigned
+ * events, but user-management endpoints deliberately go further and require
+ * admin regardless — a cashier or price_checker assigned to this event
+ * should never be able to create/reassign/remove accounts on it.
  */
+async function requireAdmin() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user || String((session.user as any).role) !== "admin") {
+    return null;
+  }
+
+  return session;
+}
+
 export async function GET(
-  request: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await params;
-  const eventId = parseId(id);
+  const eventId = Number(id);
 
-  if (!eventId) {
-    return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
   }
 
-  const url = new URL(request.url);
-  const includeAvailable =
-    url.searchParams.get("includeAvailable") === "true" ||
-    url.searchParams.get("mode") === "manage";
+  const { searchParams } = new URL(req.url);
+  const includeAvailable = searchParams.get("includeAvailable") === "true";
 
-  const users = await getEventUsers(eventId);
+  try {
+    const users = await getEventUsers(eventId);
 
-  if (!includeAvailable) {
-    return NextResponse.json(users);
+    if (!includeAvailable) {
+      return NextResponse.json(users);
+    }
+
+    const availableUsers = await getAssignableUsersForEvent(eventId);
+
+    return NextResponse.json({ users, availableUsers });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error, "Failed to load event users") },
+      { status: 500 }
+    );
   }
-
-  const availableUsers = await getAssignableUsersForEvent(eventId);
-
-  return NextResponse.json({
-    users,
-    availableUsers,
-  });
 }
 
 export async function POST(
-  request: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
-  const eventId = parseId(id);
-
-  if (!eventId) {
-    return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
+  const admin = await requireAdmin();
+  if (!admin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  try {
-    const body = await request.json();
-    const existingUserId = parseId(body.existingUserId);
+  const { id } = await params;
+  const eventId = Number(id);
 
-    if (existingUserId) {
-      const assignment = await assignUserToEvent(existingUserId, eventId);
-      return NextResponse.json({ ok: true, assignment });
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
+  }
+
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  try {
+    // Path A: assign an existing user (cashier or price checker) to this event.
+    if (body.existingUserId !== undefined) {
+      const userId = Number(body.existingUserId);
+
+      if (!Number.isFinite(userId) || userId <= 0) {
+        return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
+      }
+
+      const assignment = await assignUserToEvent(userId, eventId);
+      return NextResponse.json(assignment, { status: 201 });
     }
 
-    const user = await createAuthUser({
-      name: body.name,
-      username: body.username,
-      password: body.password,
-      role: "user",
+    // Path B: create a brand new user and assign to this event.
+    const name = String(body.name ?? "").trim();
+    const username = String(body.username ?? "").trim();
+    const password = String(body.password ?? "");
+    const role = body.role === "price_checker" ? "price_checker" : "user";
+
+    if (!name || !username || !password) {
+      return NextResponse.json(
+        { error: "Name, username, and password are required." },
+        { status: 400 }
+      );
+    }
+
+    const created = await createAuthUser({
+      name,
+      username,
+      password,
+      role,
       eventId,
     });
 
-    return NextResponse.json(user, { status: 201 });
+    return NextResponse.json(created, { status: 201 });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to save user." },
+      { error: getErrorMessage(error, "Failed to add user to event") },
       { status: 400 }
     );
   }
 }
 
 export async function PUT(
-  request: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await params;
-  const eventId = parseId(id);
+  const eventId = Number(id);
 
-  if (!eventId) {
-    return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
   }
 
-  const body = await request.json();
-  const userId = parseId(body.id);
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const userId = Number(body.id);
+  const isActive = Boolean(body.isActive);
 
-  if (!userId || typeof body.isActive !== "boolean") {
-    return NextResponse.json({ error: "Invalid payload." }, { status: 400 });
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
   }
 
-  const assignment = await setEventUserAssignmentActive(
-    userId,
-    eventId,
-    body.isActive
-  );
+  try {
+    const updated = await setEventUserAssignmentActive(userId, eventId, isActive);
 
-  return NextResponse.json({ ok: true, assignment });
+    if (!updated) {
+      return NextResponse.json(
+        { error: "User is not assigned to this event." },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json(updated);
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error, "Failed to update assignment") },
+      { status: 500 }
+    );
+  }
 }
 
 export async function DELETE(
-  request: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await params;
-  const eventId = parseId(id);
+  const eventId = Number(id);
 
-  if (!eventId) {
-    return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
+  if (!Number.isFinite(eventId) || eventId <= 0) {
+    return NextResponse.json({ error: "Invalid event ID" }, { status: 400 });
   }
 
-  const url = new URL(request.url);
-  const userId = parseId(url.searchParams.get("id"));
+  const { searchParams } = new URL(req.url);
+  const userId = Number(searchParams.get("id"));
 
-  if (!userId) {
-    return NextResponse.json({ error: "Invalid user id." }, { status: 400 });
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
   }
 
-  await unassignUserFromEvent(userId, eventId);
-  return NextResponse.json({ ok: true });
+  try {
+    await unassignUserFromEvent(userId, eventId);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error, "Failed to remove user from event") },
+      { status: 500 }
+    );
+  }
 }

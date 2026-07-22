@@ -96,6 +96,12 @@ export const localTransactions = sqliteTable("local_transactions", {
   serverTransactionId: integer("server_transaction_id"),
   syncError: text("sync_error"),
   receiptPrintCount: integer("receipt_print_count").notNull().default(0),
+
+  // ── Void tracking ─────────────────────────────────────────────────────
+  status: text("status").notNull().default("completed"),
+  voidedAt: text("voided_at"),
+  voidedBy: text("voided_by"),
+  voidReason: text("void_reason"),
 });
 
 export const localTransactionItems = sqliteTable("local_transaction_items", {

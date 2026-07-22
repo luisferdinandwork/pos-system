@@ -18,6 +18,12 @@ import {
   eventReceiptTemplates,
 } from "../lib/db/schema";
 import { formatTransactionDisplayId } from "../lib/utils";
+import {
+  normalizeEventCode,
+  makeEventVerifierCode,
+  getTransactionMonthPrefix,
+  formatEventTransactionDisplayId,
+} from "../lib/transaction-ids";
 import * as dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
@@ -31,6 +37,7 @@ if (!databaseUrl) {
 const db = drizzle(neon(databaseUrl));
 
 type SeedEvent = {
+  code: string;
   name: string;
   location: string;
   status: "draft" | "active" | "closed";
@@ -61,6 +68,7 @@ type SeedPaymentMethod = {
 
 const SEED_EVENTS: SeedEvent[] = [
   {
+    code: "JKT00001",
     name: "Jakarta Sneaker Fair 2026",
     location: "Mall Kelapa Gading",
     status: "active",
@@ -69,6 +77,7 @@ const SEED_EVENTS: SeedEvent[] = [
     transactionCount: 32,
   },
   {
+    code: "BAL00001",
     name: "Bali Summer Sale 2026",
     location: "Beachwalk Shopping Center",
     status: "closed",
@@ -77,6 +86,7 @@ const SEED_EVENTS: SeedEvent[] = [
     transactionCount: 24,
   },
   {
+    code: "BDG00001",
     name: "Bandung Weekend Expo 2026",
     location: "Paris Van Java",
     status: "draft",
@@ -356,15 +366,21 @@ async function seedStockTransactionTypes() {
 async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
   console.log("🌱 Seeding 3 events, items, stock, cashiers, and transactions...\n");
 
-  let globalTransactionSequence = 1;
-
   for (const seedEvent of SEED_EVENTS) {
+    const eventCode = normalizeEventCode(seedEvent.code);
+
+    // Tracks the next sequence per "event + month" prefix, same logic
+    // resolveDisplayId()/generateDisplayId() use in lib/transactions.ts.
+    const sequenceByPrefix = new Map<string, number>();
+
     const startDate = dateFromOffset(seedEvent.startOffsetDays);
     const endDate = dateFromOffset(seedEvent.startOffsetDays + seedEvent.durationDays);
 
     const [event] = await db
       .insert(events)
       .values({
+        code: eventCode,
+        verifierCode: makeEventVerifierCode(eventCode),
         name: seedEvent.name,
         location: seedEvent.location,
         description: `Seeded ${seedEvent.status} event for dashboard testing: ${seedEvent.name}`,
@@ -519,7 +535,12 @@ async function seedEventsAndSales(stockTypeIds: Record<string, number>) {
       const reference = paymentReference(method);
       const { cashTendered, changeAmount } = buildCashValues(method, finalAmount);
       const createdAt = randomDateBetween(startDate, seedEvent.status === "closed" ? endDate : new Date());
-      const displayId = createDisplayId(createdAt, globalTransactionSequence++);
+
+      const prefix = getTransactionMonthPrefix(eventCode, createdAt);
+      const nextSequence = (sequenceByPrefix.get(prefix) ?? 0) + 1;
+      sequenceByPrefix.set(prefix, nextSequence);
+
+      const displayId = formatEventTransactionDisplayId(eventCode, createdAt, nextSequence);
       const clientTxnId = displayId;
 
       const [txn] = await db
@@ -649,8 +670,9 @@ async function main() {
 
   console.log("🎉 Seed complete!");
   console.log("   Created exactly 3 events: active, closed, draft.");
+  console.log("   Event codes use LLLNNNNN format (e.g. JKT00001).");
   console.log("   Payment methods: Cash + EDC Debit Card/Credit Card/QRIS.");
-  console.log("   Transaction IDs use yyyyMM00001 format.");
+  console.log("   Transaction IDs use LLLNNNNN-YYYYMM-SSSSS format.");
   process.exit(0);
 }
 

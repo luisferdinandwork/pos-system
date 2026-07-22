@@ -2,7 +2,7 @@
 import { db } from "@/lib/db";
 import { events, transactions, transactionItems, payments } from "@/lib/db/schema";
 import { eq, sql, and } from "drizzle-orm";
-import { deductStock } from "@/lib/stock";
+import { deductStock, addStockTransaction } from "@/lib/stock";
 import {
   formatEventTransactionDisplayId,
   getTransactionMonthPrefix,
@@ -51,6 +51,17 @@ export type CheckoutPayload = {
   createdAt?: string | Date | null;
 };
 
+export type VoidTransactionResult = {
+  originalTransactionId: number;
+  originalDisplayId: string | null;
+  voidTransactionId: number;
+  voidDisplayId: string | null;
+  voidedAt: Date;
+  voidedBy: string | null;
+  voidReason: string | null;
+  restockedItems: { eventItemId: number; quantity: number }[];
+};
+
 function toPositiveInt(value: unknown) {
   const n = Number(value ?? 0);
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
@@ -63,7 +74,7 @@ async function getEventCode(eventId: number): Promise<string> {
     .where(eq(events.id, eventId))
     .limit(1);
 
-  if (!event?.code) throw new Error("Event not found or missing 4-digit event code.");
+  if (!event?.code) throw new Error("Event not found or missing event code.");
   return event.code;
 }
 
@@ -187,6 +198,153 @@ export async function createTransaction(payload: CheckoutPayload) {
     }
 
     return txn;
+  });
+}
+
+// ── Void ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Voids a transaction by:
+ * 1. Marking the original as status="voided" (audit trail, blocks re-void).
+ * 2. Inserting a reversing transaction (status="void_entry") with negative
+ *    amounts and negative line-item quantities/subtotals, linked back via
+ *    voidOfTransactionId. Because reports/stats sum() these tables directly,
+ *    this makes revenue/discount/itemsSold net out automatically.
+ * 3. Restocking every line item through the normal stock ledger
+ *    (stock_transactions, type "adjustment") so stock history stays truthful.
+ *
+ * displayId is PREFIXED ("VOID-<original>") rather than suffixed, so it never
+ * matches the `LIKE prefix%` sequence lookup in generateDisplayId() — a
+ * suffix could theoretically get picked up as "max" and cause the next real
+ * sale to reuse a sequence number.
+ */
+export async function voidTransaction(
+  transactionId: number,
+  options: { voidedBy?: string | null; voidReason?: string | null } = {}
+): Promise<VoidTransactionResult> {
+  return db.transaction(async (tx) => {
+    const [original] = await tx
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, transactionId))
+      .limit(1);
+
+    if (!original) {
+      throw new Error("Transaction not found.");
+    }
+
+    if ((original as any).voidOfTransactionId != null) {
+      throw new Error("Cannot void a void entry.");
+    }
+
+    // Since the original's status no longer changes to "voided", double-void
+    // protection comes from checking whether a reversing entry already
+    // exists for this transaction, instead of reading original.status.
+    const [existingVoidEntry] = await tx
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(eq(transactions.voidOfTransactionId, transactionId))
+      .limit(1);
+
+    if (existingVoidEntry) {
+      throw new Error("Transaction has already been voided.");
+    }
+
+    const items = await tx
+      .select()
+      .from(transactionItems)
+      .where(eq(transactionItems.transactionId, transactionId));
+
+    if (items.length === 0) {
+      throw new Error("Transaction has no items to reverse.");
+    }
+
+    const now = new Date();
+
+    // status is intentionally NOT changed here — the original stays
+    // "completed". voidedAt/voidedBy/voidReason are still stamped, and
+    // that's what UI/reports should check to know it was voided.
+    const [updatedOriginal] = await tx
+      .update(transactions)
+      .set({
+        voidedAt: now,
+        voidedBy: options.voidedBy ?? null,
+        voidReason: options.voidReason ?? null,
+        updatedAt: now,
+      } as any)
+      .where(eq(transactions.id, transactionId))
+      .returning();
+
+    const [voidTxn] = await tx
+      .insert(transactions)
+      .values({
+        displayId: `VOID-${original.displayId}`,
+        eventId: original.eventId,
+        clientTxnId: null,
+        cashierSessionId: original.cashierSessionId,
+        cashierName: options.voidedBy ?? original.cashierName,
+        totalAmount: String(-Number(original.totalAmount)),
+        discount: String(-Number(original.discount)),
+        finalAmount: String(-Number(original.finalAmount)),
+        cashTendered: null,
+        changeAmount: null,
+        paymentMethod: original.paymentMethod,
+        paymentReference: original.paymentReference,
+        receiptPrintCount: 0,
+        status: "void",
+        voidOfTransactionId: original.id,
+        voidedAt: now,
+        voidedBy: options.voidedBy ?? null,
+        voidReason: options.voidReason ?? null,
+        createdAt: now,
+        updatedAt: now,
+      } as any)
+      .returning();
+
+    await tx.insert(transactionItems).values(
+      items.map((item) => ({
+        transactionId: voidTxn.id,
+        eventItemId: item.eventItemId,
+        itemId: item.itemId,
+        productName: item.productName,
+        quantity: -item.quantity,
+        unitPrice: item.unitPrice,
+        discountAmt: item.discountAmt,
+        finalPrice: item.finalPrice,
+        subtotal: String(-Number(item.subtotal)),
+        promoApplied: item.promoApplied,
+      }))
+    );
+
+    const restockedItems: { eventItemId: number; quantity: number }[] = [];
+
+    for (const item of items) {
+      await addStockTransaction(
+        {
+          eventItemId: item.eventItemId,
+          typeCode: "adjustment",
+          quantity: Math.abs(item.quantity),
+          transactionId: voidTxn.id,
+          referenceType: "void",
+          referenceId: voidTxn.id,
+          note: `Restocked from voided transaction #${original.id} (${original.displayId})`,
+        },
+        tx
+      );
+
+      restockedItems.push({ eventItemId: item.eventItemId, quantity: item.quantity });
+    }
+
+    return {
+      originalTransactionId: updatedOriginal.id,
+      originalDisplayId: updatedOriginal.displayId ?? null,
+      voidTransactionId: voidTxn.id,
+      voidDisplayId: voidTxn.displayId ?? null,
+      voidedAt: now,
+      voidedBy: (updatedOriginal as any).voidedBy ?? null,
+      voidReason: (updatedOriginal as any).voidReason ?? null,
+      restockedItems,
+    };
   });
 }
 
@@ -339,6 +497,11 @@ export async function getTransactionsByEvent(eventId: number) {
       paymentMethod: transactions.paymentMethod,
       paymentReference: transactions.paymentReference,
       receiptPrintCount: transactions.receiptPrintCount,
+      status: transactions.status,
+      voidedAt: transactions.voidedAt,
+      voidedBy: transactions.voidedBy,
+      voidReason: transactions.voidReason,
+      voidOfTransactionId: transactions.voidOfTransactionId,
       createdAt: transactions.createdAt,
     })
     .from(transactions)
@@ -353,7 +516,7 @@ export async function getTransactionItems(transactionId: number) {
 export async function getEventStats(eventId: number) {
   const [agg] = await db
     .select({
-      txnCount: sql<number>`count(*)`,
+      txnCount: sql<number>`count(*) filter (where ${transactions.voidOfTransactionId} is null)`,
       revenue: sql<number>`coalesce(sum(${transactions.finalAmount}),0)`,
       discount: sql<number>`coalesce(sum(${transactions.discount}),0)`,
       receiptPrintCount: sql<number>`coalesce(sum(${transactions.receiptPrintCount}),0)`,
@@ -382,7 +545,7 @@ export async function getEventTodayStats(eventId: number) {
 
   const [r] = await db
     .select({
-      txnCount: sql<number>`count(distinct ${transactions.id})`,
+      txnCount: sql<number>`count(distinct ${transactions.id}) filter (where ${transactions.voidOfTransactionId} is null)`,
       revenue: sql<number>`coalesce(sum(${transactions.finalAmount}),0)`,
       discount: sql<number>`coalesce(sum(${transactions.discount}),0)`,
       receiptPrintCount: sql<number>`coalesce(sum(${transactions.receiptPrintCount}),0)`,
@@ -409,7 +572,7 @@ export async function getAllEventsStats() {
   const txnRows = await db
     .select({
       eventId: transactions.eventId,
-      txnCount: sql<number>`count(distinct ${transactions.id})`,
+      txnCount: sql<number>`count(distinct ${transactions.id}) filter (where ${transactions.voidOfTransactionId} is null)`,
       revenue: sql<number>`coalesce(sum(${transactions.finalAmount}),0)`,
       discount: sql<number>`coalesce(sum(${transactions.discount}),0)`,
       receiptPrintCount: sql<number>`coalesce(sum(${transactions.receiptPrintCount}),0)`,
@@ -453,6 +616,11 @@ export async function getAllTransactions() {
       paymentMethod: transactions.paymentMethod,
       paymentReference: transactions.paymentReference,
       receiptPrintCount: transactions.receiptPrintCount,
+      status: transactions.status,
+      voidedAt: transactions.voidedAt,
+      voidedBy: transactions.voidedBy,
+      voidReason: transactions.voidReason,
+      voidOfTransactionId: transactions.voidOfTransactionId,
       createdAt: transactions.createdAt,
     })
     .from(transactions)

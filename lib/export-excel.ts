@@ -22,6 +22,12 @@ import {
   authUsers,
   authUserEvents,
 } from "@/lib/db/schema";
+import { localDb } from "@/lib/local-db";
+import {
+  localTransactions,
+  localTransactionItems,
+  localEventItems,
+} from "@/lib/local-db/schema";
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -88,35 +94,240 @@ export async function buildTransactionExcel(): Promise<Uint8Array> {
   const workbook = new ExcelJS.Workbook();
   const sheet    = workbook.addWorksheet("Transactions");
 
+  const VOID_RED = "FFDC2626";
+  const VOID_BG  = "FFFEF2F2";
+
   sheet.columns = [
-    { header: "Date",              key: "date",      width: 22 },
-    { header: "Transaction ID",    key: "txnId",     width: 14 },
-    { header: "Event ID",          key: "eventId",   width: 10 },
-    { header: "Items",             key: "items",     width: 45 },
-    { header: "Subtotal (Rp)",     key: "subtotal",  width: 16 },
-    { header: "Discount (Rp)",     key: "discount",  width: 16 },
-    { header: "Total (Rp)",        key: "total",     width: 16 },
-    { header: "Payment Method",    key: "method",    width: 18 },
-    { header: "Payment Reference", key: "reference", width: 24 },
+    { header: "Date",              key: "date",       width: 22 },
+    { header: "Transaction ID",    key: "txnId",      width: 14 },
+    { header: "Event ID",          key: "eventId",    width: 10 },
+    { header: "Status",            key: "status",     width: 14 },
+    { header: "Voided By",         key: "voidedBy",   width: 18 },
+    { header: "Void Reason",       key: "voidReason", width: 26 },
+    { header: "Items",             key: "items",      width: 45 },
+    { header: "Subtotal (Rp)",     key: "subtotal",   width: 16 },
+    { header: "Discount (Rp)",     key: "discount",   width: 16 },
+    { header: "Total (Rp)",        key: "total",      width: 16 },
+    { header: "Payment Method",    key: "method",     width: 18 },
+    { header: "Payment Reference", key: "reference",  width: 24 },
   ];
   styleHeader(sheet);
 
   const txns = await getAllTransactions();
   for (const txn of txns) {
     const items = await getTransactionItems(txn.id);
-    sheet.addRow({
-      date:      txn.createdAt ? formatDate(txn.createdAt) : "—",
-      txnId:     txn.id,
-      eventId:   txn.eventId,
-      items:     items.map(i => `${i.productName} x${i.quantity}`).join(", "),
-      subtotal:  parseFloat(String(txn.totalAmount)),
-      discount:  parseFloat(String(txn.discount ?? 0)),
-      total:     parseFloat(String(txn.finalAmount)),
-      method:    txn.paymentMethod ?? "—",
-      reference: txn.paymentReference ?? "—",
+
+    // Only the reversing entry counts as "Void" — an original that was
+    // later voided still reads as "Completed" here. voidedAt/voidedBy/
+    // voidReason are shown as separate audit columns regardless of which
+    // row this is, since that's useful context, not a status label.
+    const isVoidEntry = txn.voidOfTransactionId != null;
+
+    const row = sheet.addRow({
+      date:       txn.createdAt ? formatDate(txn.createdAt) : "—",
+      txnId:      txn.id,
+      eventId:    txn.eventId,
+      status:     isVoidEntry ? "Void" : "Completed",
+      voidedBy:   txn.voidedBy ?? "—",
+      voidReason: txn.voidReason ?? "—",
+      items:      items.map(i => `${i.productName} x${i.quantity}`).join(", "),
+      subtotal:   parseFloat(String(txn.totalAmount)),
+      discount:   parseFloat(String(txn.discount ?? 0)),
+      total:      parseFloat(String(txn.finalAmount)),
+      method:     txn.paymentMethod ?? "—",
+      reference:  txn.paymentReference ?? "—",
     });
+
+    if (isVoidEntry) {
+      row.getCell("status").font = { bold: true, color: { argb: VOID_RED } };
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: VOID_BG } };
+      });
+    }
   }
   ["subtotal", "discount", "total"].forEach(k => { sheet.getColumn(k).numFmt = "#,##0"; });
+  return toUint8Array(workbook);
+}
+
+// ── Export: POS Transactions (today / whole event, from local SQLite) ────────
+// Same look as the "Transactions" sheet in buildEventReportExcel, but scoped
+// to a single event, sourced from the local POS SQLite (works offline), and
+// optionally filtered to today only.
+export async function buildLocalTransactionsExcel(
+  eventId: number,
+  opts: { todayOnly?: boolean } = {}
+): Promise<Uint8Array> {
+  const { todayOnly = false } = opts;
+
+  const workbook   = new ExcelJS.Workbook();
+  workbook.creator = "POS System";
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet("Transactions");
+
+  const BRAND    = "FF1e104e";
+  const VOID_RED = "FFDC2626";
+  const VOID_BG  = "FFFEF2F2";
+
+  sheet.columns = [
+    { header: "Date",                key: "date",         width: 20 },
+    { header: "Transaction ID",      key: "displayId",    width: 22 },
+    { header: "Client Txn ID",       key: "clientTxnId",  width: 26 },
+    { header: "Cashier",             key: "cashier",      width: 20 },
+    { header: "Status",              key: "status",       width: 14 },
+    { header: "Sync Status",         key: "syncStatus",   width: 12 },
+    { header: "Voided By",           key: "voidedBy",     width: 18 },
+    { header: "Void Reason",         key: "voidReason",   width: 26 },
+    { header: "Receipt Print Count", key: "printCount",   width: 18 },
+    { header: "Payment Method",      key: "method",       width: 18 },
+    { header: "Reference",           key: "reference",    width: 18 },
+    { header: "Cash Tendered",       key: "cashTendered", width: 16 },
+    { header: "Change",              key: "changeAmount", width: 14 },
+    { header: "Base Item No.",       key: "baseItemNo",   width: 16 },
+    { header: "Variant Code",        key: "variantCode",  width: 13 },
+    { header: "Ref No.",             key: "itemId",       width: 18 },
+    { header: "Product",             key: "product",      width: 34 },
+    { header: "Promo Applied",       key: "promo",        width: 22 },
+    { header: "Qty",                 key: "qty",          width: 8  },
+    { header: "Unit Price",          key: "unitPrice",    width: 14 },
+    { header: "Discount",            key: "discount",     width: 13 },
+    { header: "Final Price",         key: "finalPrice",   width: 13 },
+    { header: "Subtotal",            key: "subtotal",     width: 14 },
+  ];
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font      = { bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
+  headerRow.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
+  headerRow.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  headerRow.height    = 24;
+  sheet.views       = [{ state: "frozen", ySplit: 1 }];
+  sheet.autoFilter  = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columnCount } };
+
+  let txns = localDb
+    .select()
+    .from(localTransactions)
+    .where(eq(localTransactions.eventId, eventId))
+    .orderBy(desc(localTransactions.createdAt))
+    .all();
+
+  if (todayOnly) {
+    // Matches getLocalEventStats' definition of "today" so this export lines
+    // up with the numbers shown on the POS Sales Report drawer.
+    const todayPrefix = new Date().toISOString().slice(0, 10);
+    txns = txns.filter(txn => String(txn.createdAt ?? "").startsWith(todayPrefix));
+  }
+
+  const clientTxnIds = txns.map(txn => txn.clientTxnId);
+
+  const lineRows = clientTxnIds.length > 0
+    ? localDb.select().from(localTransactionItems).where(inArray(localTransactionItems.clientTxnId, clientTxnIds)).all()
+    : [];
+
+  const linesByTxn = new Map<string, typeof lineRows>();
+  for (const line of lineRows) {
+    const arr = linesByTxn.get(line.clientTxnId) ?? [];
+    arr.push(line);
+    linesByTxn.set(line.clientTxnId, arr);
+  }
+
+  const itemRows    = localDb.select().from(localEventItems).where(eq(localEventItems.eventId, eventId)).all();
+  const itemMetaMap = new Map(itemRows.map(item => [item.id, item]));
+
+  const n = (v: unknown) => Number(v ?? 0);
+  const d = (v: unknown) => v ? formatDate(String(v)) : "—";
+
+  function styleVoidRow(row: ExcelJS.Row) {
+    row.getCell("status").font = { bold: true, color: { argb: VOID_RED } };
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: VOID_BG } };
+    });
+  }
+
+  for (const txn of txns) {
+    const lines     = linesByTxn.get(txn.clientTxnId) ?? [];
+    const displayId = txn.displayId ?? txn.clientTxnId;
+    const isVoided  = txn.status === "voided";
+
+    const baseTxnData = {
+      date:         d(txn.createdAt),
+      displayId,
+      clientTxnId:  txn.clientTxnId,
+      cashier:      txn.cashierName ?? "—",
+      status:       isVoided ? "Voided" : "Completed",
+      syncStatus:   txn.syncStatus ?? "—",
+      voidedBy:     txn.voidedBy ?? "—",
+      voidReason:   txn.voidReason ?? "—",
+      printCount:   n(txn.receiptPrintCount),
+      method:       txn.paymentMethod ?? "—",
+      reference:    txn.paymentReference ?? "—",
+      cashTendered: txn.cashTendered ? n(txn.cashTendered) : 0,
+      changeAmount: txn.changeAmount ? n(txn.changeAmount) : 0,
+    };
+
+    if (lines.length === 0) {
+      const row = sheet.addRow({
+        ...baseTxnData,
+        baseItemNo: "—", variantCode: "—", itemId: "—",
+        product: "(no items)", promo: "—",
+        qty: 0, unitPrice: 0, discount: 0, finalPrice: 0, subtotal: 0,
+      });
+      if (isVoided) styleVoidRow(row);
+      continue;
+    }
+
+    for (const line of lines) {
+      const meta = itemMetaMap.get(line.eventItemId);
+      const row = sheet.addRow({
+        ...baseTxnData,
+        baseItemNo:  meta?.baseItemNo ?? line.itemId ?? "—",
+        variantCode: meta?.variantCode ?? "—",
+        itemId:      line.itemId ?? "—",
+        product:     line.productName ?? "—",
+        promo:       line.promoApplied ?? "—",
+        qty:         n(line.quantity),
+        unitPrice:   n(line.unitPrice),
+        discount:    n(line.discountAmt),
+        finalPrice:  n(line.finalPrice),
+        subtotal:    n(line.subtotal),
+      });
+      if (isVoided) styleVoidRow(row);
+    }
+  }
+
+  ["cashTendered", "changeAmount", "unitPrice", "discount", "finalPrice", "subtotal"]
+    .forEach(k => { sheet.getColumn(k).numFmt = "#,##0"; });
+
+  // Fill blanks, then apply borders/wrap/zebra — same finishing pass as
+  // buildEventReportExcel, minus the void-row fills which are set above.
+  sheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+    if (rowNumber === 1) return;
+    for (let col = 1; col <= sheet.columnCount; col++) {
+      const cell = row.getCell(col);
+      if (cell.value === null || cell.value === undefined || cell.value === "") {
+        cell.value = "—";
+      }
+    }
+  });
+
+  sheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.alignment = { ...(cell.alignment ?? {}), vertical: "middle", wrapText: true };
+      cell.border = {
+        top:    { style: "thin", color: { argb: "FFE5E7EB" } },
+        left:   { style: "thin", color: { argb: "FFE5E7EB" } },
+        bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+        right:  { style: "thin", color: { argb: "FFE5E7EB" } },
+      };
+    });
+    if (rowNumber > 1 && rowNumber % 2 === 0) {
+      row.eachCell((cell) => {
+        if (!cell.fill || (cell.fill as any).type === undefined) {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFAFAF8" } };
+        }
+      });
+    }
+  });
+
   return toUint8Array(workbook);
 }
 
@@ -650,6 +861,20 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   workbook.creator = "POS System";
   workbook.created = new Date();
 
+  function describeTxnStatus(
+    voidOfTransactionId: number | null | undefined
+  ): string {
+    // The original ALWAYS reads "Completed" here, regardless of voidedAt —
+    // only the reversing entry (voidOfTransactionId set) is ever "Void".
+    return voidOfTransactionId != null ? "Void" : "Completed";
+  }
+
+  function isVoidEntryRow(
+    voidOfTransactionId: number | null | undefined
+  ): boolean {
+    return voidOfTransactionId != null;
+  }
+
   // ── Fetch all data upfront ─────────────────────────────────────────────────
   const [eventRow] = await db.select().from(events).where(eq(events.id, eventId)).limit(1);
   const eventName  = eventRow?.name ?? `Event ${eventId}`;
@@ -686,11 +911,12 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     transferOut: number;
     sold: number;
     adjustment: number;
+    voidRestocked: number;
   };
 
   const stockMap = new Map<number, StockMovement>();
   for (const item of itemRows) {
-    stockMap.set(item.id, { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0 });
+    stockMap.set(item.id, { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0, voidRestocked: 0 });
   }
 
   for (const row of stockTxRows) {
@@ -701,7 +927,17 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     if (row.typeCode === "transfer_in")  m.transferIn  += qty;
     if (row.typeCode === "transfer_out") m.transferOut += Math.abs(qty);
     if (row.typeCode === "sale")         m.sold        += Math.abs(qty);
-    if (row.typeCode === "adjustment")   m.adjustment  += qty;
+    if (row.typeCode === "adjustment") {
+      if (row.referenceType === "void") {
+        // This is a restock generated by voidTransaction(). Net it back out
+        // of "sold" so this sheet's Units Sold agrees with Sales Summary
+        // (Sheet 3), which already nets void_entry line items automatically.
+        m.sold -= Math.abs(qty);
+        m.voidRestocked += Math.abs(qty);
+      } else {
+        m.adjustment += qty;
+      }
+    }
   }
 
   const txnRows = await db
@@ -724,6 +960,11 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
       createdAt:        transactions.createdAt,
       // posUserName from the joined session — used as a secondary source
       posUserName:      cashierSessions.cashierName,
+      status:              transactions.status,
+      voidedAt:            transactions.voidedAt,
+      voidedBy:            transactions.voidedBy,
+      voidReason:          transactions.voidReason,
+      voidOfTransactionId: transactions.voidOfTransactionId,
     })
     .from(transactions)
     .leftJoin(cashierSessions, eq(transactions.cashierSessionId, cashierSessions.id))
@@ -756,8 +997,16 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     linesByTxn.set(line.transactionId, arr);
   }
 
+  // Line items that belong to a void-entry (reversing) transaction — used to
+  // compute a "Voided Units" figure per item for the Sales Summary sheet.
+  const voidEntryTxnIds = new Set(
+    txnRows.filter(t => t.voidOfTransactionId != null).map(t => t.id)
+  );
+
   type ItemSales = { unitsSold: number; grossRevenue: number; netRevenue: number; discount: number };
   const salesMap = new Map<number, ItemSales>();
+  const voidedUnitsMap = new Map<number, number>();
+
   for (const line of lineRows) {
     const cur = salesMap.get(line.eventItemId) ?? { unitsSold: 0, grossRevenue: 0, netRevenue: 0, discount: 0 };
     const qty = Number(line.quantity ?? 0);
@@ -766,6 +1015,13 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     cur.netRevenue   += Number(line.subtotal ?? 0);
     cur.discount     += Number(line.discountAmt ?? 0) * qty;
     salesMap.set(line.eventItemId, cur);
+
+    if (voidEntryTxnIds.has(line.transactionId)) {
+      voidedUnitsMap.set(
+        line.eventItemId,
+        (voidedUnitsMap.get(line.eventItemId) ?? 0) + Math.abs(qty)
+      );
+    }
   }
 
   const printCountRows = txnIds.length > 0
@@ -854,6 +1110,8 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   const PURPLE = "FF4a1d96";
   const GRAY = "FF4b5563";
   const ORANGE = "FFc2410c";
+  const VOID_RED = "FFDC2626";
+  const VOID_BG = "FFFEF2F2";
 
   function setupSheet(sheet: ExcelJS.Worksheet, headerColor = BRAND) {
     const row = sheet.getRow(1);
@@ -888,25 +1146,26 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   // ══ Sheet 1 — Items & Stock ════════════════════════════════════════════════
   const s1 = workbook.addWorksheet("Items & Stock", { properties: { tabColor: { argb: BLUE } } });
   s1.columns = [
-    { header: "Base Item No.",      key: "baseItemNo",   width: 16 },
-    { header: "Variant Code",       key: "variantCode",  width: 13 },
-    { header: "Reference No.",      key: "itemId",       width: 22 },
-    { header: "Description",        key: "name",         width: 36 },
-    { header: "Description 2",      key: "color",        width: 22 },
-    { header: "Unit",               key: "unit",         width: 8  },
-    { header: "Net Price",          key: "netPrice",     width: 14 },
-    { header: "Retail Price",       key: "retailPrice",  width: 14 },
-    { header: "Total Item Lines",   key: "itemLine",     width: 16 },
-    { header: "Total Transfer In",  key: "transferIn",   width: 18 },
-    { header: "Total Transfer Out", key: "transferOut",  width: 18 },
-    { header: "Adjusted Stock",     key: "adjustment",   width: 16 },
-    { header: "Total Units Sold",   key: "sold",         width: 16 },
-    { header: "Remaining Stock",    key: "stock",        width: 16 },
+    { header: "Base Item No.",           key: "baseItemNo",    width: 16 },
+    { header: "Variant Code",            key: "variantCode",   width: 13 },
+    { header: "Reference No.",           key: "itemId",        width: 22 },
+    { header: "Description",             key: "name",          width: 36 },
+    { header: "Description 2",           key: "color",         width: 22 },
+    { header: "Unit",                    key: "unit",          width: 8  },
+    { header: "Net Price",               key: "netPrice",      width: 14 },
+    { header: "Retail Price",            key: "retailPrice",   width: 14 },
+    { header: "Total Item Lines",        key: "itemLine",      width: 16 },
+    { header: "Total Transfer In",       key: "transferIn",    width: 18 },
+    { header: "Total Transfer Out",      key: "transferOut",   width: 18 },
+    { header: "Adjusted Stock",          key: "adjustment",    width: 16 },
+    { header: "Voided Units Restocked",  key: "voidRestocked", width: 20 },
+    { header: "Total Units Sold",        key: "sold",          width: 16 },
+    { header: "Remaining Stock",         key: "stock",         width: 16 },
   ];
   setupSheet(s1, BLUE);
 
   for (const item of itemRows) {
-    const m = stockMap.get(item.id) ?? { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0 };
+    const m = stockMap.get(item.id) ?? { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0, voidRestocked: 0 };
     s1.addRow({
       baseItemNo: item.baseItemNo ?? item.itemId,
       itemId: item.itemId,
@@ -920,21 +1179,24 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
       transferIn: m.transferIn,
       transferOut: m.transferOut,
       adjustment: m.adjustment,
+      voidRestocked: m.voidRestocked,
       sold: m.sold,
       stock: item.stock,
     });
   }
-  const totalTransferIn  = [...stockMap.values()].reduce((s, m) => s + m.transferIn,  0);
-  const totalTransferOut = [...stockMap.values()].reduce((s, m) => s + m.transferOut, 0);
-  const totalAdjustment  = [...stockMap.values()].reduce((s, m) => s + m.adjustment,  0);
-  const totalUnitsSold   = [...stockMap.values()].reduce((s, m) => s + m.sold,        0);
-  const totalRemaining   = itemRows.reduce((s, i) => s + Number(i.stock), 0);
+  const totalTransferIn    = [...stockMap.values()].reduce((s, m) => s + m.transferIn,    0);
+  const totalTransferOut   = [...stockMap.values()].reduce((s, m) => s + m.transferOut,   0);
+  const totalAdjustment    = [...stockMap.values()].reduce((s, m) => s + m.adjustment,    0);
+  const totalVoidRestocked = [...stockMap.values()].reduce((s, m) => s + m.voidRestocked, 0);
+  const totalUnitsSold     = [...stockMap.values()].reduce((s, m) => s + m.sold,          0);
+  const totalRemaining     = itemRows.reduce((s, i) => s + Number(i.stock), 0);
   const itemTotalRow = s1.addRow({
     name: `TOTAL — ${eventName}`,
     itemLine: itemRows.length,
     transferIn: totalTransferIn,
     transferOut: totalTransferOut,
     adjustment: totalAdjustment,
+    voidRestocked: totalVoidRestocked,
     sold: totalUnitsSold,
     stock: totalRemaining,
   });
@@ -951,9 +1213,12 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   const s2 = workbook.addWorksheet("Transactions", { properties: { tabColor: { argb: BRAND } } });
   s2.columns = [
     { header: "Date",                key: "date",          width: 20 },
-    { header: "Transaction ID",      key: "displayId",     width: 18 },
+    { header: "Transaction ID",      key: "displayId",     width: 22 },
     { header: "Client Txn ID",       key: "clientTxnId",   width: 26 },
     { header: "POS User",            key: "posUser",       width: 20 },
+    { header: "Status",              key: "status",        width: 14 },
+    { header: "Voided By",           key: "voidedBy",      width: 18 },
+    { header: "Void Reason",         key: "voidReason",    width: 26 },
     { header: "Receipt Print Count", key: "printCount",    width: 18 },
     { header: "Payment Method",      key: "method",        width: 18 },
     { header: "Reference",           key: "reference",     width: 18 },
@@ -972,17 +1237,29 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   ];
   setupSheet(s2, BRAND);
 
+  function styleVoidRow(row: ExcelJS.Row) {
+    row.getCell("status").font = { bold: true, color: { argb: VOID_RED } };
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: VOID_BG } };
+    });
+  }
+
   for (const txn of txnRows) {
     const lines = linesByTxn.get(txn.id) ?? [];
     const displayId = txn.displayId ?? txn.clientTxnId ?? String(txn.id);
     const printCount = printCountMap.get(txn.id) ?? 0;
     const posUser = txn.cashierNameDirect ?? txn.posUserName ?? "—";
+    const statusLabel = describeTxnStatus(txn.voidOfTransactionId);
+    const voided = isVoidEntryRow(txn.voidOfTransactionId);
 
     const baseTxnData = {
       date: d(txn.createdAt),
       displayId,
       clientTxnId: txn.clientTxnId ?? "—",
       posUser,
+      status: statusLabel,
+      voidedBy: txn.voidedBy ?? "—",
+      voidReason: txn.voidReason ?? "—",
       printCount,
       method: txn.paymentMethod ?? "—",
       reference: txn.paymentReference ?? "—",
@@ -991,7 +1268,7 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     };
 
     if (lines.length === 0) {
-      s2.addRow({
+      const row = s2.addRow({
         ...baseTxnData,
         baseItemNo: "—",
         variantCode: "—",
@@ -1004,12 +1281,13 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
         finalPrice: 0,
         subtotal: 0,
       });
+      if (voided) styleVoidRow(row);
       continue;
     }
 
     for (const line of lines) {
       const meta = itemMetaMap.get(line.eventItemId);
-      s2.addRow({
+      const row = s2.addRow({
         ...baseTxnData,
         baseItemNo:  meta?.baseItemNo ?? line.itemId ?? "—",
         itemId:      line.itemId ?? "—",
@@ -1022,6 +1300,7 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
         finalPrice:  n(line.finalPrice),
         subtotal:    n(line.subtotal),
       });
+      if (voided) styleVoidRow(row);
     }
   }
   moneyCols(s2, ["cashTendered", "changeAmount", "unitPrice", "discount", "finalPrice", "subtotal"]);
@@ -1038,7 +1317,8 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     { header: "Total Transfer In", key: "transferIn", width: 18 },
     { header: "Total Transfer Out", key: "transferOut", width: 18 },
     { header: "Adjusted Stock",  key: "adjustment",   width: 16 },
-    { header: "Total Units Sold",key: "unitsSold",    width: 16 },
+    { header: "Total Units Sold (Net)",key: "unitsSold", width: 20 },
+    { header: "Voided Units",    key: "voidedUnits",  width: 15 },
     { header: "Remaining Stock", key: "remaining",    width: 16 },
     { header: "Gross Revenue",   key: "grossRevenue", width: 16 },
     { header: "Discounts Given", key: "discounts",    width: 16 },
@@ -1047,13 +1327,15 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   ];
   setupSheet(s3, GREEN);
 
-  let totalGross = 0, totalDisc = 0, totalNet = 0;
+  let totalGross = 0, totalDisc = 0, totalNet = 0, totalVoidedUnits = 0;
   for (const item of itemRows) {
     const s = salesMap.get(item.id) ?? { unitsSold: 0, grossRevenue: 0, netRevenue: 0, discount: 0 };
-    const m = stockMap.get(item.id) ?? { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0 };
+    const m = stockMap.get(item.id) ?? { transferIn: 0, transferOut: 0, sold: 0, adjustment: 0, voidRestocked: 0 };
+    const voidedUnits = voidedUnitsMap.get(item.id) ?? 0;
     totalGross += s.grossRevenue;
     totalDisc  += s.discount;
     totalNet   += s.netRevenue;
+    totalVoidedUnits += voidedUnits;
     s3.addRow({
       baseItemNo: item.baseItemNo ?? item.itemId,
       itemId: item.itemId,
@@ -1065,6 +1347,7 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
       transferOut: m.transferOut,
       adjustment: m.adjustment,
       unitsSold: s.unitsSold,
+      voidedUnits,
       remaining: item.stock,
       grossRevenue: s.grossRevenue,
       discounts: s.discount,
@@ -1079,6 +1362,7 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
     transferOut: totalTransferOut,
     adjustment: totalAdjustment,
     unitsSold: totalUnitsSold,
+    voidedUnits: totalVoidedUnits,
     remaining: totalRemaining,
     grossRevenue: totalGross,
     discounts: totalDisc,
@@ -1158,7 +1442,7 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   const txnDisplayByDbId = new Map(txnRows.map(t => [t.id, t.displayId ?? t.clientTxnId ?? String(t.id)]));
   for (const row of stockTxRows) {
     const item = itemMetaMap.get(row.eventItemId);
-    s6.addRow({
+    const excelRow = s6.addRow({
       date: d(row.createdAt),
       type: row.typeName ?? row.typeCode,
       baseItemNo: item?.baseItemNo ?? "",
@@ -1173,6 +1457,9 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
       referenceId: row.referenceId ?? "",
       note: row.note ?? "",
     });
+    if (row.referenceType === "void") {
+      excelRow.font = { color: { argb: VOID_RED } };
+    }
   }
 
   // ══ Sheet 7 — Promotions ══════════════════════════════════════════════════
@@ -1275,9 +1562,16 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   s8.addRow([`Generated: ${new Date().toLocaleString("id-ID")}`]).font = { italic: true, color: { argb: "FF6B7280" } };
   s8.addRow([]);
 
+  // Original (customer-facing) transactions — excludes the reversing void_entry
+  // rows, since those aren't separate sales, just accounting reversals.
+  const originalTxnRows = txnRows.filter(t => t.voidOfTransactionId == null);
+  const completedTxnRows = originalTxnRows.filter(t => !t.voidedAt);
+  const voidedTxnCount = originalTxnRows.filter(t => !!t.voidedAt).length;
+
   const totalFinal = txnRows.reduce((s, t) => s + n(t.finalAmount), 0);
   const totalTxnDisc  = txnRows.reduce((s, t) => s + n(t.discount), 0);
   const totalTxnGross = txnRows.reduce((s, t) => s + n(t.totalAmount), 0);
+  const totalFinalCompleted = completedTxnRows.reduce((s, t) => s + n(t.finalAmount), 0);
   const totalPrints = [...printCountMap.values()].reduce((s, c) => s + c, 0);
   const totalCashExpected = drawerRows.reduce((s, r) => s + n(r.expectedCash), 0);
   const totalCashActual = drawerRows.reduce((s, r) => s + n(r.actualCash), 0);
@@ -1292,12 +1586,14 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   s8.addRow([]);
 
   addSection("Transactions");
-  addKV("Total Transactions", txnRows.length);
+  addKV("Total Transactions", originalTxnRows.length);
+  addKV("Voided Transactions", voidedTxnCount);
   addKV("Receipt Print Count", totalPrints);
   addKV("Gross Revenue (Rp)", totalTxnGross, true);
   addKV("Total Discounts (Rp)", totalTxnDisc);
   addKV("Net Revenue (Rp)", totalFinal, true);
-  addKV("Avg per Transaction", txnRows.length > 0 ? Math.round(totalFinal / txnRows.length) : 0);
+  addKV("Avg per Transaction (all)", originalTxnRows.length > 0 ? Math.round(totalFinal / originalTxnRows.length) : 0);
+  addKV("Avg per Completed Sale", completedTxnRows.length > 0 ? Math.round(totalFinalCompleted / completedTxnRows.length) : 0);
   s8.addRow([]);
 
   addSection("Stock");
@@ -1305,7 +1601,8 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   addKV("Total Transfer In", totalTransferIn);
   addKV("Total Transfer Out", totalTransferOut);
   addKV("Adjusted Stock", totalAdjustment);
-  addKV("Total Units Sold", totalUnitsSold, true);
+  addKV("Voided Units Restocked", totalVoidRestocked);
+  addKV("Total Units Sold (Net)", totalUnitsSold, true);
   addKV("Remaining Stock", totalRemaining, true);
   s8.addRow([]);
 
@@ -1334,7 +1631,11 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   for (const txn of txnRows) {
     const method = txn.paymentMethod ?? "Unknown";
     const cur = methodTotals.get(method) ?? { count: 0, total: 0 };
-    cur.count++;
+    // Only count original transactions toward "count" — the reversing
+    // void_entry row shouldn't be counted as a second sale on this method.
+    if (txn.voidOfTransactionId == null) cur.count++;
+    // Totals sum across ALL rows including void_entry, since the negative
+    // reversal is exactly what makes this net out to the correct figure.
     cur.total += n(txn.finalAmount);
     methodTotals.set(method, cur);
   }
@@ -1357,6 +1658,9 @@ export async function buildEventReportExcel(eventId: number): Promise<Uint8Array
   }
 
   // Apply borders, wrapping, alignment, and alternating row fills.
+  // NOTE: void-related fills (styleVoidRow on Sheet 2, void rows on Sheet 6)
+  // were already set above — this pass only fills cells that don't already
+  // have a fill, so it won't overwrite the red void highlighting.
   for (const sheet of workbook.worksheets) {
     sheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
       row.eachCell({ includeEmpty: true }, (cell) => {

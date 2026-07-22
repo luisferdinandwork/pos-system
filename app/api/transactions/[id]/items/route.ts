@@ -1,7 +1,7 @@
 // app/api/transactions/[id]/items/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { transactions, transactionItems } from "@/lib/db/schema";
+import { transactions, transactionItems, eventItems } from "@/lib/db/schema";
 import { eq, asc } from "drizzle-orm";
 
 export async function GET(
@@ -39,7 +39,10 @@ export async function GET(
         transactionId: transactionItems.transactionId,
         eventItemId: transactionItems.eventItemId,
         itemId: transactionItems.itemId,
+        baseItemNo: eventItems.baseItemNo,
         productName: transactionItems.productName,
+        color: eventItems.color,
+        variantCode: eventItems.variantCode,
         quantity: transactionItems.quantity,
         unitPrice: transactionItems.unitPrice,
         discountAmt: transactionItems.discountAmt,
@@ -48,6 +51,7 @@ export async function GET(
         promoApplied: transactionItems.promoApplied,
       })
       .from(transactionItems)
+      .leftJoin(eventItems, eq(transactionItems.eventItemId, eventItems.id))
       .where(eq(transactionItems.transactionId, transactionId))
       .orderBy(asc(transactionItems.id));
 

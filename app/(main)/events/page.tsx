@@ -4,6 +4,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
+  EVENT_COMPANIES,
+  inferEventCompany,
+  type EventCompany,
+} from "@/lib/transaction-ids";
+import {
   AlertCircle,
   ArrowRight,
   Calendar as CalendarIcon,
@@ -55,6 +60,7 @@ type EventStatus = keyof typeof STATUS_META;
 type EventRow = {
   id: number;
   code: string;
+  company?: string | null;
   verifierCode?: string | null;
   name: string;
   location: string | null;
@@ -66,7 +72,8 @@ type EventRow = {
 
 type Form = {
   id?: number;
-  code: string;
+  code?: string;
+  company: EventCompany | "";
   name: string;
   location: string;
   description: string;
@@ -77,7 +84,7 @@ type Form = {
 
 type DuplicateForm = {
   sourceEvent: EventRow;
-  code: string;
+  company: EventCompany;
   name: string;
   location: string;
   description: string;
@@ -93,7 +100,7 @@ const PAGE_SIZE = 12;
 
 function emptyForm(): Form {
   return {
-    code: "",
+    company: "",
     name: "",
     location: "",
     description: "",
@@ -169,7 +176,7 @@ function getApiError(result: unknown, fallback: string) {
 function cleanFormPayload(form: Form) {
   return {
     id: form.id,
-    code: form.code.trim(),
+    company: form.id ? undefined : form.company || undefined,
     name: form.name.trim(),
     location: form.location.trim() || null,
     description: form.description.trim() || null,
@@ -216,21 +223,23 @@ function DateField({
       </label>
 
       <Popover>
-        <PopoverTrigger>
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start rounded-xl border px-3 py-2 text-sm font-normal"
-            style={{
-              borderColor: "var(--border)",
-              color: value ? "var(--foreground)" : "var(--muted-foreground)",
-              background: "var(--card)",
-            }}
-          >
-            <CalendarIcon size={15} className="mr-2" />
-            {formatDateButtonLabel(value)}
-          </Button>
-        </PopoverTrigger>
+        <PopoverTrigger
+          render={
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full justify-start rounded-xl border px-3 py-2 text-sm font-normal"
+              style={{
+                borderColor: "var(--border)",
+                color: value ? "var(--foreground)" : "var(--muted-foreground)",
+                background: "var(--card)",
+              }}
+            >
+              <CalendarIcon size={15} className="mr-2" />
+              {formatDateButtonLabel(value)}
+            </Button>
+          }
+        />
 
         <PopoverContent className="w-auto p-0" align="start">
           <Calendar
@@ -241,13 +250,7 @@ function DateField({
 
           {value && (
             <div className="border-t p-2" style={{ borderColor: "var(--border)" }}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="w-full"
-                onClick={() => onChange("")}
-              >
+              <Button type="button" variant="ghost" size="sm" className="w-full" onClick={() => onChange("")}>
                 Clear date
               </Button>
             </div>
@@ -486,6 +489,7 @@ export default function EventsPage() {
     setForm({
       id: event.id,
       code: event.code ?? "",
+      company: "",
       name: event.name ?? "",
       location: event.location ?? "",
       description: event.description ?? "",
@@ -509,8 +513,13 @@ export default function EventsPage() {
 
     const payload = cleanFormPayload(form);
 
-    if (!payload.code || !payload.name) {
-      setPageError("Event code and event name are required.");
+    if (!payload.name) {
+      setPageError("Event name is required.");
+      return;
+    }
+
+    if (!form.id && !payload.company) {
+      setPageError("Please select a company (PRI or PNT).");
       return;
     }
 
@@ -550,7 +559,7 @@ export default function EventsPage() {
 
     setDuplicateForm({
       sourceEvent: event,
-      code: `${event.code}-COPY`,
+      company: inferEventCompany(event) ?? "PRI",
       name: `${event.name} Copy`,
       location: event.location ?? "",
       description: event.description ?? "",
@@ -567,8 +576,8 @@ export default function EventsPage() {
 
     if (!duplicateForm) return;
 
-    if (!duplicateForm.code.trim() || !duplicateForm.name.trim()) {
-      setPageError("New event code and event name are required.");
+    if (!duplicateForm.company || !duplicateForm.name.trim()) {
+      setPageError("Company and event name are required.");
       return;
     }
 
@@ -582,7 +591,7 @@ export default function EventsPage() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          code: duplicateForm.code.trim(),
+          company: duplicateForm.company,
           name: duplicateForm.name.trim(),
           location: duplicateForm.location.trim() || null,
           description: duplicateForm.description.trim() || null,
@@ -863,19 +872,49 @@ export default function EventsPage() {
                 className="mb-1 block text-xs font-semibold uppercase tracking-wider"
                 style={{ color: "var(--muted-foreground)" }}
               >
-                Event Code
+                {form.id ? "Event Code" : "Company"}
               </label>
-              <input
-                value={form.code}
-                onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value }))}
-                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
-                style={{
-                  borderColor: "var(--border)",
-                  color: "var(--foreground)",
-                  background: "var(--input, var(--card))",
-                }}
-                placeholder="EVT-001"
-              />
+
+              {form.id ? (
+                <div
+                  className="flex w-full items-center rounded-xl border px-3 py-2 text-sm font-mono"
+                  style={{
+                    borderColor: "var(--border)",
+                    color: "var(--muted-foreground)",
+                    background: "var(--background)",
+                  }}
+                >
+                  {form.code || "—"}
+                  <span className="ml-2 text-xs font-sans font-normal">(auto-generated)</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  {EVENT_COMPANIES.map((company) => {
+                    const selected = form.company === company.value;
+
+                    return (
+                      <button
+                        key={company.value}
+                        type="button"
+                        onClick={() =>
+                          setForm((prev) => ({ ...prev, company: company.value }))
+                        }
+                        className="rounded-xl border px-3 py-2 text-left text-sm transition"
+                        style={{
+                          borderColor: selected ? "#fb923c" : "var(--border)",
+                          background: selected ? "rgba(251,146,60,0.1)" : "var(--input, var(--card))",
+                          color: "var(--foreground)",
+                        }}
+                      >
+                        <span className="block font-bold">{company.label}</span>
+                        <span className="block text-xs" style={{ color: "var(--muted-foreground)" }}>
+                          {company.name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div>
@@ -1043,20 +1082,39 @@ export default function EventsPage() {
                 className="mb-1 block text-xs font-semibold uppercase tracking-wider"
                 style={{ color: "var(--muted-foreground)" }}
               >
-                New Event Code
+                Company
               </label>
-              <input
-                value={duplicateForm.code}
-                onChange={(e) =>
-                  setDuplicateForm((prev) => (prev ? { ...prev, code: e.target.value } : prev))
-                }
-                className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
-                style={{
-                  borderColor: "var(--border)",
-                  color: "var(--foreground)",
-                  background: "var(--input, var(--card))",
-                }}
-              />
+              <div className="grid grid-cols-2 gap-2">
+                {EVENT_COMPANIES.map((company) => {
+                  const selected = duplicateForm.company === company.value;
+
+                  return (
+                    <button
+                      key={company.value}
+                      type="button"
+                      onClick={() =>
+                        setDuplicateForm((prev) =>
+                          prev ? { ...prev, company: company.value } : prev
+                        )
+                      }
+                      className="rounded-xl border px-3 py-2 text-left text-sm transition"
+                      style={{
+                        borderColor: selected ? "#fb923c" : "var(--border)",
+                        background: selected ? "rgba(251,146,60,0.1)" : "var(--input, var(--card))",
+                        color: "var(--foreground)",
+                      }}
+                    >
+                      <span className="block font-bold">{company.label}</span>
+                      <span className="block text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        {company.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-xs" style={{ color: "var(--muted-foreground)" }}>
+                The new event code will be generated automatically.
+              </p>
             </div>
 
             <div>
@@ -1380,6 +1438,17 @@ export default function EventsPage() {
                     >
                       {event.code}
                     </span>
+                    {inferEventCompany(event) && (
+                      <span
+                        className="rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wider"
+                        style={{
+                          background: "rgba(251,146,60,0.12)",
+                          color: "#c2410c",
+                        }}
+                      >
+                        {inferEventCompany(event)}
+                      </span>
+                    )}
                   </div>
 
                   <h3
@@ -1533,6 +1602,11 @@ export default function EventsPage() {
                           style={{ color: "var(--muted-foreground)" }}
                         >
                           {event.code}
+                          {inferEventCompany(event) && (
+                            <span className="ml-1.5 font-sans font-bold" style={{ color: "#c2410c" }}>
+                              {inferEventCompany(event)}
+                            </span>
+                          )}
                         </p>
                       </div>
                     </td>

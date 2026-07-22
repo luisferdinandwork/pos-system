@@ -4,7 +4,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
-  ArrowLeft, Search, X, RefreshCw, ChevronDown, ChevronUp,
+  ArrowLeft, Ban, Search, X, RefreshCw, ChevronDown, ChevronUp,
   ChevronRight, Printer, Receipt, Filter, Calendar,
   CreditCard, CheckCircle2, AlertCircle, Clock, History,
   DollarSign, Tag, TrendingUp,
@@ -29,10 +29,15 @@ type LocalTxn = {
   syncStatus: "pending" | "synced" | "failed";
   serverTransactionId: number | null;
   syncError: string | null;
-  receiptPrintCount?: number | null;  // stored in SQLite — our source of truth
+  receiptPrintCount?: number | null;
+  status?: string | null;
+  voidedAt?: string | null;
+  voidedBy?: string | null;
+  voidReason?: string | null;
 };
 type TxnItem = {
-  clientTxnId: string; eventItemId: number; itemId: string; productName: string;
+  clientTxnId: string; eventItemId: number; itemId: string; baseItemNo?: string | null; productName: string;
+  color?: string | null; variantCode?: string | null;
   quantity: number; unitPrice: string; discountAmt: string; finalPrice: string;
   subtotal: string; promoApplied: string | null;
 };
@@ -89,6 +94,13 @@ function HistoryInner() {
 
   const { printReceipt, printing } = usePrintReceipt();
 
+  // ── Void state ──────────────────────────────────────────────────────────
+  const [voidTarget, setVoidTarget] = useState<LocalTxn | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidedBy,   setVoidedBy]   = useState("");
+  const [voiding,    setVoiding]    = useState(false);
+  const [voidError,  setVoidError]  = useState<string | null>(null);
+
   useEffect(() => {
     if (!eventId) {
       setLoading(false);
@@ -112,9 +124,6 @@ function HistoryInner() {
   }
 
   async function loadPrintCountsForTxns(list: LocalTxn[]) {
-    // Use receiptPrintCount stored directly in SQLite — same source the POS page uses.
-    // No extra cloud fetches needed; the local count is incremented on every print
-    // and synced to Neon by the /api/local/transactions/[clientTxnId]/receipt-print route.
     const entries = list.map(txn => [
       txn.clientTxnId,
       Number(txn.receiptPrintCount ?? 0),
@@ -129,7 +138,7 @@ function HistoryInner() {
       const data = await fetch(`/api/local/events/${eventId}/transactions`, { cache: "no-store" }).then(r => r.json());
       const list: LocalTxn[] = Array.isArray(data) ? data : [];
       setTxns(list);
-      loadPrintCountsForTxns(list); // sync — no await needed
+      loadPrintCountsForTxns(list);
     } catch {
       setTxns([]);
     } finally {
@@ -194,6 +203,55 @@ function HistoryInner() {
           : row
       )
     );
+  }
+
+  // ── Void handlers ───────────────────────────────────────────────────────
+  function openVoidModal(txn: LocalTxn) {
+    setVoidTarget(txn);
+    setVoidReason("");
+    setVoidedBy("");
+    setVoidError(null);
+  }
+
+  async function confirmVoid() {
+    if (!voidTarget || !eventId) return;
+
+    setVoiding(true);
+    setVoidError(null);
+
+    try {
+      const response = await fetch(
+        `/api/local/events/${eventId}/transactions/${encodeURIComponent(voidTarget.clientTxnId)}/void`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            voidedBy: voidedBy.trim() || null,
+            voidReason: voidReason.trim() || null,
+          }),
+        }
+      );
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "Failed to void transaction.");
+      }
+
+      if (data?.cloudVoided === false && data?.cloudError) {
+        setVoidError(
+          `Voided locally, but cloud sync failed: ${data.cloudError}. Retry once back online.`
+        );
+      } else {
+        setVoidTarget(null);
+      }
+
+      await loadTxns();
+    } catch (error) {
+      setVoidError(error instanceof Error ? error.message : "Failed to void transaction.");
+    } finally {
+      setVoiding(false);
+    }
   }
 
   const allMethods = useMemo(()=>[...new Set(txns.map(t=>t.paymentMethod).filter(Boolean))].sort(),[txns]);
@@ -384,7 +442,7 @@ function HistoryInner() {
             <>
               {/* Desktop table header */}
               <div className="hidden sm:grid items-center text-[10px] font-black uppercase tracking-widest"
-                style={{ gridTemplateColumns:"1.8fr 1fr 130px 90px 52px 44px", background:C.muted, borderBottom:`1px solid ${C.border}`, color:C.mutedFg }}>
+                style={{ gridTemplateColumns:"1.8fr 1fr 130px 90px 52px 52px 44px", background:C.muted, borderBottom:`1px solid ${C.border}`, color:C.mutedFg }}>
                 {(["createdAt","paymentMethod","finalAmount","syncStatus"] as SortKey[]).map((k,idx)=>(
                   <button key={k} onClick={()=>toggleSort(k)}
                     className={`flex items-center gap-1 px-4 py-3 hover:text-gray-700 transition-colors ${idx===2?"justify-end":""}`}>
@@ -393,6 +451,7 @@ function HistoryInner() {
                   </button>
                 ))}
                 <div className="px-3 py-3 text-center">Print</div>
+                <div className="px-3 py-3 text-center">Void</div>
                 <div className="px-3 py-3"/>
               </div>
 
@@ -404,12 +463,25 @@ function HistoryInner() {
                 const printCount = printCounts[txn.clientTxnId]??0;
                 const isLast     = i===filtered.length-1;
 
+                /**
+                 * NOTE — asymmetry with the cloud Transactions tab:
+                 * Locally there is only ONE row per sale (voidLocalTransaction
+                 * just marks this row voided in place; it does not create a
+                 * separate reversing "entry" row the way the cloud side does).
+                 * So there is no second row to badge as "Void" here — applying
+                 * "stay completed, badge only the new entry" literally means
+                 * this local row shows NO void indication at all once voided.
+                 * hasBeenVoided is kept ONLY to hide the Void button so the
+                 * same sale can't be voided twice; it drives no visual styling.
+                 */
+                const hasBeenVoided = txn.status === "voided";
+
                 return (
                   <div key={txn.clientTxnId} style={{ borderBottom:isLast?"none":`1px solid ${C.muted}` }}>
 
                     {/* Desktop row */}
                     <div className="hidden sm:grid items-center transition-colors hover:bg-gray-50/50"
-                      style={{ gridTemplateColumns:"1.8fr 1fr 130px 90px 52px 44px" }}>
+                      style={{ gridTemplateColumns:"1.8fr 1fr 130px 90px 52px 52px 44px" }}>
 
                       {/* Date + ID */}
                       <div className="px-4 py-3.5">
@@ -463,6 +535,18 @@ function HistoryInner() {
                         </button>
                       </div>
 
+                      {/* Void button */}
+                      <div className="px-2 py-3.5 flex justify-center">
+                        {!hasBeenVoided ? (
+                          <button onClick={()=>openVoidModal(txn)}
+                            className="w-8 h-8 rounded-xl flex items-center justify-center border transition-all hover:bg-red-50"
+                            style={{ borderColor:C.border, color:"#dc2626" }}
+                            title="Void this transaction">
+                            <Ban size={13}/>
+                          </button>
+                        ) : null}
+                      </div>
+
                       {/* Expand button */}
                       <div className="px-2 py-3.5 flex justify-center">
                         <button onClick={()=>toggleExpand(txn.clientTxnId)}
@@ -490,6 +574,13 @@ function HistoryInner() {
                           </span>
                           {/* Action buttons grouped */}
                           <div className="flex items-center gap-1">
+                            {!hasBeenVoided && (
+                              <button onClick={()=>openVoidModal(txn)}
+                                className="w-8 h-8 rounded-xl flex items-center justify-center border"
+                                style={{ borderColor:C.border, color:"#dc2626" }}>
+                                <Ban size={13}/>
+                              </button>
+                            )}
                             <button onClick={()=>handlePrint(txn)} disabled={printing}
                               className="relative w-8 h-8 rounded-xl flex items-center justify-center border"
                               style={{ borderColor:C.border, color:C.mutedFg }}>
@@ -571,6 +662,40 @@ function HistoryInner() {
           </p>
         )}
       </div>
+
+      {/* ── Void confirm modal ── */}
+      {voidTarget && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4" style={{ background:"rgba(30,16,78,0.65)", backdropFilter:"blur(8px)" }}>
+          <div className="w-full max-w-md rounded-3xl shadow-2xl overflow-hidden" style={{ background:"white" }}>
+            <div className="px-6 py-5 flex items-center justify-between" style={{ borderBottom:`1px solid ${C.border}` }}>
+              <p className="text-base font-black" style={{ color:C.fg }}>Void Transaction</p>
+              <button onClick={()=>setVoidTarget(null)} className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ color:C.mutedFg }}><X size={14}/></button>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-sm" style={{ color:C.mutedFg }}>
+                This will reverse <strong style={{ color:C.fg }}>{voidTarget.clientTxnId}</strong>, restore its items to stock, and remove it from revenue totals.
+              </p>
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color:C.mutedFg }}>Voided by</label>
+                <input value={voidedBy} onChange={e=>setVoidedBy(e.target.value)} placeholder="Your name"
+                  className="w-full rounded-xl border px-3 py-2.5 text-sm focus:outline-none" style={{ borderColor:C.border, color:C.fg }}/>
+              </div>
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color:C.mutedFg }}>Reason (optional)</label>
+                <textarea value={voidReason} onChange={e=>setVoidReason(e.target.value)} rows={2}
+                  className="w-full rounded-xl border px-3 py-2.5 text-sm focus:outline-none resize-none" style={{ borderColor:C.border, color:C.fg }}/>
+              </div>
+              {voidError && <div className="text-xs font-semibold px-3 py-2.5 rounded-xl" style={{ background:"rgba(220,38,38,0.08)", color:"#dc2626" }}>{voidError}</div>}
+            </div>
+            <div className="px-6 py-4 flex gap-2 justify-end" style={{ background:C.muted, borderTop:`1px solid ${C.border}` }}>
+              <button onClick={()=>setVoidTarget(null)} disabled={voiding} className="px-5 py-2.5 rounded-xl text-sm font-bold border" style={{ background:"white", borderColor:C.border, color:C.secFg }}>Cancel</button>
+              <button onClick={confirmVoid} disabled={voiding} className="px-5 py-2.5 rounded-xl text-sm font-black disabled:opacity-50" style={{ background:"#dc2626", color:"white" }}>
+                {voiding?"Voiding…":"Void Transaction"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

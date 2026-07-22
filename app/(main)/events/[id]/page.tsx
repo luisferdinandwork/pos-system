@@ -201,14 +201,14 @@ export default function EventDetailPage() {
   // ── Tabs ─────────────────────────────────────────────────────────────────────
   const TABS: { key: Tab; label: string; icon: React.ReactNode; count?: number }[] = [
     { key: "dashboard",       label: "Overview",     icon: <LayoutDashboard size={13} /> },
-    { key: "transactions",    label: "Sales",        icon: <History size={13} />,        count: txns.length },
     { key: "items",           label: "Items",        icon: <Package2 size={13} />,       count: items.length },
     { key: "stock",           label: "Stock",        icon: <Activity size={13} /> },
-    { key: "promos",          label: "Promos",       icon: <Tag size={13} />,            count: promos.length },
+    { key: "users",           label: "Users",        icon: <User size={13} /> },
     { key: "cashierSessions", label: "Sessions",     icon: <User size={13} /> },
     { key: "cashDrawer",      label: "Cash",         icon: <WalletCards size={13} /> },
     { key: "receipt",         label: "Receipt",      icon: <ReceiptText size={13} /> },
-    { key: "users",           label: "Users",        icon: <User size={13} /> },
+    { key: "promos",          label: "Promos",       icon: <Tag size={13} />,            count: promos.length },
+    { key: "transactions",    label: "Sales",        icon: <History size={13} />,        count: txns.length },
   ];
 
   return (
@@ -395,6 +395,11 @@ export default function EventDetailPage() {
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--muted-foreground)" }} />
               <input value={itemSearch} onChange={e => setItemSearch(e.target.value)} placeholder="Search items…" className="w-full rounded-xl border pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400" style={ist} />
             </div>
+
+            <a href={`/api/events/${eventId}/products/template`} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border" style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
+              <FileSpreadsheet size={12} /> Template
+            </a>
+
             <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={handleImport} />
             <button onClick={() => fileRef.current?.click()} disabled={importing || isLocalView} className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border" style={{ borderColor: "var(--border)", background: "var(--secondary)", color: "var(--foreground)" }}>
               <Upload size={12} /> {importing ? "Importing…" : "Import"}

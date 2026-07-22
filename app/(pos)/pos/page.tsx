@@ -9,7 +9,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, Banknote, BarChart2,
   Building2, Check, CheckCircle2, ChevronDown, ChevronRight,
-  CloudUpload, CreditCard, Database, DollarSign, History, LogOut,
+  CloudUpload, CreditCard, Database, DollarSign, FileSpreadsheet, History, LogOut,
   MapPin, Minus, Package, Plus, Power, Printer, RefreshCw, ScanLine,
   Search, ShoppingBag, Tag, Trash2, TrendingUp, User, Wifi, WifiOff, X, Zap,
 } from "lucide-react";
@@ -25,6 +25,9 @@ import {
 import { CashierSessionModal } from "@/components/pos/CashierSessionModal";
 import { useSession, signOut } from "next-auth/react";
 
+// Customer copy + merchant copy, printed automatically when a sale completes.
+const DEFAULT_RECEIPT_COPIES = 2;
+
 // ── Types (unchanged) ─────────────────────────────────────────────────────────
 type EventRow = {
   id: number;
@@ -34,8 +37,8 @@ type EventRow = {
   location: string | null;
   startDate?: string | null;
   endDate?: string | null;
-};type EventItem  = { id: number; eventId: number; stock: number; originalStock?: number; retailPrice: string; netPrice: string; itemId: string; name: string; color: string | null; variantCode: string | null; unit: string | null; };
-type CartItem   = { eventItemId: number; itemId: string; productName: string; variantCode: string | null; color: string | null; quantity: number; unitPrice: number; discountAmt: number; finalPrice: number; promoApplied: string | null; freeQty: number; };
+};type EventItem  = { id: number; eventId: number; stock: number; originalStock?: number; retailPrice: string; netPrice: string; itemId: string; baseItemNo?: string | null; name: string; color: string | null; variantCode: string | null; unit: string | null; };
+type CartItem   = { eventItemId: number; itemId: string; baseItemNo?: string | null; productName: string; variantCode: string | null; color: string | null; quantity: number; unitPrice: number; discountAmt: number; finalPrice: number; promoApplied: string | null; freeQty: number; };
 type PayMethod  = { id: number; name: string; type: string; edcMethod: string | null; edcMachineId: number | null; provider: string | null; };
 type PromoRes   = { finalUnitPrice: number; discountAmt: number; promoName: string | null; freeQty: number };
 type PromoTier  = { minQty: number; discountPct?: string | null; discountFix?: string | null; fixedPrice?: string | null };
@@ -162,6 +165,35 @@ function calculatePromoClient(item: EventItem, quantity: number, cartSubtotal: n
     if (result.discountAmt > best.discountAmt || result.freeQty > best.freeQty) best = result;
   }
   return best;
+}
+
+// ── Cart quantity input — typeable, with a draft buffer so mid-edit states
+// (cleared field, partial digits) don't get clobbered by the committed value ──
+function QtyInput({ value, onChange }: { value: number; onChange: (qty: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => { setDraft(String(value)); }, [value]);
+
+  function commit() {
+    const parsed = parseInt(draft, 10);
+    if (!Number.isFinite(parsed)) { setDraft(String(value)); return; }
+    if (parsed !== value) onChange(parsed);
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+      onFocus={(e) => e.target.select()}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      className="w-10 text-center text-sm font-black bg-transparent focus:outline-none"
+      style={{ color: "var(--foreground)" }}
+    />
+  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -356,9 +388,9 @@ function POSInner() {
   async function loadLocalBundle(eventId: number) {
     try { const res=await fetch(`/api/local/events/${eventId}/bundle`,{cache:"no-store"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); applyBundle(d as LocalBundle); setLocalReady(true); await refreshPendingCount(eventId); setScreen("sell"); await loadActiveCashierSession(eventId); return d as LocalBundle; } catch { setLocalReady(false); return null; }
   }
-  async function prepareEventOffline(eventId: number) {
+  async function prepareEventOffline(eventId: number, silent=false) {
     setPreparing(true);
-    try { const res=await fetch(`/api/local/events/${eventId}/prepare`,{method:"POST"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); localStorage.setItem("pos:last-event-id",String(eventId)); applyBundle(d.bundle as LocalBundle); setLocalReady(true); flash("Event prepared for offline POS"); return d.bundle as LocalBundle; } catch(e) { flash(e instanceof Error?e.message:"Failed.",true); return null; } finally { setPreparing(false); }
+    try { const res=await fetch(`/api/local/events/${eventId}/prepare`,{method:"POST"}); const d=await res.json(); if (!res.ok) throw new Error(d.error); localStorage.setItem("pos:last-event-id",String(eventId)); applyBundle(d.bundle as LocalBundle); setLocalReady(true); if (!silent) flash("Event prepared for offline POS"); return d.bundle as LocalBundle; } catch(e) { if (!silent) flash(e instanceof Error?e.message:"Failed.",true); return null; } finally { setPreparing(false); }
   }
   async function openLocalEvent(ev: EventRow) {
     if (!canAccessEvent(ev.id)) {
@@ -398,10 +430,13 @@ function POSInner() {
 
       await refreshPendingCount(eventId);
 
-      const fresh = await loadLocalBundle(eventId);
-      if (fresh) {
-        setItems(fresh.items);
-      }
+      // Pull fresh event/items/promos down from the cloud too — "Sync" only
+      // used to push local sales up and re-read the (still stale) local
+      // snapshot, so edits made on the events page never showed up here
+      // until someone separately clicked "Refresh". Re-pulling after a
+      // successful push keeps local stock in step with what the cloud now
+      // reflects for the sales that just synced.
+      await prepareEventOffline(eventId, true);
 
       if (Number(result?.failed ?? 0) > 0) {
         const firstError = result?.results?.find((r: any) => !r.ok)?.error;
@@ -454,6 +489,7 @@ function POSInner() {
     const row: CartItem = {
       eventItemId: item.id,
       itemId: item.itemId,
+      baseItemNo: item.baseItemNo,
       productName: item.name,
       variantCode: item.variantCode,
       color: item.color,
@@ -473,8 +509,13 @@ function POSInner() {
         : [...prev, row]
     );
 
+    // Clearing the query already hides the suggestions overlay (it requires
+    // both searchFocused AND a non-empty query) — don't also flip
+    // searchFocused here. The input never actually loses DOM focus when a
+    // suggestion is picked (rows use onMouseDown preventDefault), so setting
+    // this to false would desync it from real focus and the overlay would
+    // stay hidden on the next keystroke until the input is blurred/refocused.
     setQuery("");
-    setSearchFocused(false);
   }
 
   async function changeQty(eventItemId: number, qty: number) {
@@ -762,7 +803,7 @@ function POSInner() {
           <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>
             {suggestions.length} result{suggestions.length!==1?"s":""} — press Enter for exact match
           </p>
-          <button type="button" onClick={()=>{setQuery("");setSearchFocused(false);}} className="w-7 h-7 rounded-lg flex items-center justify-center transition-all hover:bg-red-50" style={{ color:C.mutedFg }}><X size={13}/></button>
+          <button type="button" onClick={()=>{setQuery("");setSearchFocused(false);scanRef.current?.focus();}} className="w-7 h-7 rounded-lg flex items-center justify-center transition-all hover:bg-red-50" style={{ color:C.mutedFg }}><X size={13}/></button>
         </div>
         <div className="max-h-[420px] overflow-y-auto p-2">
           {suggestions.length===0?(
@@ -836,7 +877,7 @@ function POSInner() {
     const snapCashier = snap?.cashierName ?? cashierSession?.cashierName ?? null;
     const printCount = Number(snap?.receiptPrintCount ?? 0);
 
-    async function handlePrintSuccess() {
+    async function handlePrintSuccess(copies = DEFAULT_RECEIPT_COPIES) {
       if (!snap) return;
 
       /**
@@ -877,7 +918,10 @@ function POSInner() {
 
       const itemsForPrint = snap.cart.map((item) => ({
         itemId: item.itemId,
+        baseItemNo: item.baseItemNo,
         productName: item.productName,
+        color: item.color,
+        variantCode: item.variantCode,
         quantity: item.quantity,
         unitPrice: String(item.unitPrice),
         discountAmt: String(item.discountAmt),
@@ -891,6 +935,7 @@ function POSInner() {
         eventName: snap.eventName ?? event?.name ?? null,
         cashierName: snap.cashierName ?? cashierSession?.cashierName ?? null,
         printNumber: nextPrintNumber,
+        copies,
       });
 
       const result = await incrementLocalReceiptPrintCount(snap.clientTxnId);
@@ -923,6 +968,15 @@ function POSInner() {
           ? `Receipt re-printed #${nextCount}`
           : "Receipt printed"
       );
+    }
+
+    function handleNextSale() {
+      // Fire-and-forget — don't make the cashier wait on the printer before
+      // moving to the next sale. handlePrintSuccess reads from `snap`
+      // (lastTxnSnapshot), which nextTransaction() below does not clear, so
+      // it stays valid for the async print/count-increment work to finish.
+      void handlePrintSuccess();
+      nextTransaction();
     }
 
     return (
@@ -1149,7 +1203,7 @@ function POSInner() {
           {/* Actions */}
           <div className="px-5 pb-5 flex gap-2">
             <button
-              onClick={nextTransaction}
+              onClick={handleNextSale}
               className="flex-1 rounded-2xl py-3.5 text-sm font-black transition-all hover:opacity-90"
               style={{
                 background: C.orange,
@@ -1160,7 +1214,7 @@ function POSInner() {
             </button>
 
             <button
-              onClick={handlePrintSuccess}
+              onClick={() => handlePrintSuccess()}
               disabled={printing}
               className="px-5 rounded-2xl text-sm font-bold border flex items-center gap-1.5 disabled:opacity-40 transition-all hover:bg-gray-50"
               style={{
@@ -1309,7 +1363,21 @@ function POSInner() {
               </div>
             )}
           </div>
-          <div className="flex-shrink-0 px-5 py-4" style={{ borderTop:`1px solid ${C.border}` }}>
+          <div className="flex-shrink-0 px-5 py-4 space-y-2" style={{ borderTop:`1px solid ${C.border}` }}>
+            {event?.id && (
+              <div className="grid grid-cols-2 gap-2">
+                <a href={`/api/local/events/${event.id}/transactions/export?scope=today`}
+                  className="flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold border transition-all hover:bg-gray-50"
+                  style={{ borderColor:C.border, color:C.secFg }} title="Export today's transactions to Excel">
+                  <FileSpreadsheet size={12}/> Today
+                </a>
+                <a href={`/api/local/events/${event.id}/transactions/export?scope=all`}
+                  className="flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold border transition-all hover:bg-gray-50"
+                  style={{ borderColor:C.border, color:C.secFg }} title="Export all event transactions to Excel">
+                  <FileSpreadsheet size={12}/> Whole Event
+                </a>
+              </div>
+            )}
             <button onClick={()=>event?.id&&loadDailyStats(event.id)} disabled={loadingStats}
               className="w-full rounded-xl py-2.5 text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-40 transition-all hover:bg-gray-100"
               style={{ background:C.muted, color:C.secFg }}>
@@ -1775,7 +1843,7 @@ function POSInner() {
                         <button onClick={()=>changeQty(item.eventItemId,item.quantity-1)}
                           className="w-8 h-8 flex items-center justify-center transition-all hover:bg-red-50"
                           style={{ color:"#ef4444" }}><Minus size={13}/></button>
-                        <span className="w-8 text-center text-sm font-black" style={{ color:C.fg }}>{item.quantity}</span>
+                        <QtyInput value={item.quantity} onChange={(qty)=>changeQty(item.eventItemId,qty)}/>
                         <button onClick={()=>changeQty(item.eventItemId,item.quantity+1)}
                           className="w-8 h-8 flex items-center justify-center transition-all hover:bg-green-50"
                           style={{ color:"#16a34a" }}><Plus size={13}/></button>

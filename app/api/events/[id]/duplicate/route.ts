@@ -9,7 +9,12 @@ import {
   promoItems,
 } from "@/lib/db/schema";
 import { eq, inArray } from "drizzle-orm";
-import { generateEventVerifierCode } from "@/lib/events";
+import {
+  generateEventVerifierCode,
+  insertEventWithGeneratedCode,
+  inferEventCompany,
+  isEventCompany,
+} from "@/lib/events";
 
 function toDateOnly(val: unknown): Date | null {
   if (val == null) return null;
@@ -47,28 +52,6 @@ export async function POST(
       unknown
     >;
 
-    const newCode = String(body.code ?? "").trim();
-
-    if (!/^\d{4}$/.test(newCode)) {
-      return NextResponse.json(
-        { error: "New event code must be exactly 4 digits." },
-        { status: 400 }
-      );
-    }
-
-    const [existingCode] = await db
-      .select({ id: events.id })
-      .from(events)
-      .where(eq(events.code, newCode))
-      .limit(1);
-
-    if (existingCode) {
-      return NextResponse.json(
-        { error: `Event code "${newCode}" is already used.` },
-        { status: 400 }
-      );
-    }
-
     const [source] = await db
       .select()
       .from(events)
@@ -77,6 +60,20 @@ export async function POST(
 
     if (!source) {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
+    }
+
+    const company = isEventCompany(body.company)
+      ? body.company
+      : inferEventCompany(source);
+
+    if (!company) {
+      return NextResponse.json(
+        {
+          error:
+            'Company is required and must be "PRI" or "PNT" (could not be inferred from the source event).',
+        },
+        { status: 400 }
+      );
     }
 
     const sourceItems = await db
@@ -110,25 +107,22 @@ export async function POST(
     const newName =
       String(body.name ?? "").trim() || `${source.name} (Copy)`;
 
-    const [newEvent] = await db
-      .insert(events)
-      .values({
-        code: newCode,
-        verifierCode: generateEventVerifierCode(),
-        name: newName,
-        location:
-          body.location !== undefined
-            ? String(body.location ?? "").trim() || null
-            : source.location,
-        description:
-          body.description !== undefined
-            ? String(body.description ?? "").trim() || null
-            : source.description,
-        status: "draft",
-        startDate: toDateOnly(body.startDate),
-        endDate: toDateOnly(body.endDate),
-      })
-      .returning();
+    const newEvent = await insertEventWithGeneratedCode(company, {
+      verifierCode: generateEventVerifierCode(),
+      name: newName,
+      location:
+        body.location !== undefined
+          ? String(body.location ?? "").trim() || null
+          : source.location,
+      description:
+        body.description !== undefined
+          ? String(body.description ?? "").trim() || null
+          : source.description,
+      status: "draft",
+      startDate: toDateOnly(body.startDate),
+      endDate: toDateOnly(body.endDate),
+      updatedAt: new Date(),
+    });
 
     const oldToNewItemId = new Map<number, number>();
 

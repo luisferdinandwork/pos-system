@@ -81,6 +81,9 @@ export async function getUserById(id: number): Promise<AuthUser | null> {
  * Includes:
  * - legacy auth_users.event_id
  * - new auth_user_events active assignments
+ *
+ * Role-generic: works the same for "user" and "price_checker" — only
+ * "admin" is special-cased (admins don't need event assignment).
  */
 export async function getUserEventIds(userId: number): Promise<number[]> {
   const user = await getUserById(userId);
@@ -136,7 +139,10 @@ export async function getUserWithEventsByUsername(
 export async function getAllAuthUsersWithEvents(): Promise<
   AuthUserWithEvents[]
 > {
-  const users = await db.select().from(authUsers).orderBy(authUsers.name);
+  const users = await db
+    .select()
+    .from(authUsers)
+    .orderBy(authUsers.name);
 
   if (users.length === 0) return [];
 
@@ -245,7 +251,9 @@ export async function getUsersByEvent(eventId: number): Promise<AuthUser[]> {
 
 /**
  * New helper for Event Users tab.
- * Returns active cashier users not currently assigned to this event.
+ * Returns active, unassigned users who CAN be assigned to an event —
+ * both cashiers ("user") and price-checker-only accounts ("price_checker"),
+ * since both role types are event-scoped. Admins are never assignable here.
  */
 export async function getAssignableUsersForEvent(
   eventId: number
@@ -259,7 +267,7 @@ export async function getAssignableUsersForEvent(
       .from(authUsers)
       .where(
         and(
-          eq(authUsers.role, "user"),
+          inArray(authUsers.role, ["user", "price_checker"]),
           eq(authUsers.isActive, true),
           notInArray(authUsers.id, currentIds)
         )
@@ -270,19 +278,27 @@ export async function getAssignableUsersForEvent(
   return db
     .select()
     .from(authUsers)
-    .where(and(eq(authUsers.role, "user"), eq(authUsers.isActive, true)))
+    .where(
+      and(
+        inArray(authUsers.role, ["user", "price_checker"]),
+        eq(authUsers.isActive, true)
+      )
+    )
     .orderBy(authUsers.name);
 }
 
 /**
  * Existing function - kept.
  * Added eventIds support without removing eventId support.
+ * Role type widened to include "price_checker" — a new role that, like
+ * "user", is event-scoped (needs eventId/eventIds) but has no access
+ * beyond the /price-check page (enforced in middleware.ts).
  */
 export async function createAuthUser(data: {
   name: string;
   username: string;
   password: string;
-  role: "admin" | "user";
+  role: "admin" | "user" | "price_checker";
   eventId?: number | null;
   eventIds?: number[];
 }) {
@@ -345,6 +361,7 @@ export async function createAuthUser(data: {
 /**
  * Existing function - kept.
  * Added eventIds support without removing eventId support.
+ * Role type widened to include "price_checker".
  */
 export async function updateAuthUser(
   id: number,
@@ -352,7 +369,7 @@ export async function updateAuthUser(
     name?: string;
     username?: string;
     password?: string;
-    role?: "admin" | "user";
+    role?: "admin" | "user" | "price_checker";
     eventId?: number | null;
     eventIds?: number[];
     isActive?: boolean;
@@ -606,6 +623,7 @@ export async function verifyLogin(username: string, password: string) {
 /**
  * Existing function - kept.
  * Now supports both legacy auth_users.event_id and new auth_user_events.
+ * Role-generic: only "admin" is special-cased.
  */
 export async function assertUserCanAccessEvent(data: {
   userId: number;

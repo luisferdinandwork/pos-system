@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  Ban,
   ChevronDown,
   ChevronUp,
   CreditCard,
@@ -40,6 +41,11 @@ type Transaction = {
   paymentMethod: string | null;
   paymentReference: string | null;
   createdAt: string | null;
+  status?: string | null;
+  voidOfTransactionId?: number | null;
+  voidedAt?: string | null;
+  voidedBy?: string | null;
+  voidReason?: string | null;
 };
 
 type TransactionItem = {
@@ -47,7 +53,10 @@ type TransactionItem = {
   transactionId?: number;
   eventItemId: number;
   itemId: string;
+  baseItemNo?: string | null;
   productName: string;
+  color?: string | null;
+  variantCode?: string | null;
   quantity: number;
   unitPrice: string;
   discountAmt: string;
@@ -82,16 +91,19 @@ export function TransactionsTab({
   const [printCounts, setPrintCounts] = useState<Record<number, number>>({});
   const [search, setSearch] = useState("");
 
-  /**
-   * Local template fallback.
-   * If parent page does not pass receiptTemplate, this tab loads it itself.
-   */
   const [localReceiptTemplate, setLocalReceiptTemplate] =
     useState<EventReceiptTemplate | null>(receiptTemplate ?? null);
 
   const { printReceipt, printing } = usePrintReceipt();
 
   const resolvedReceiptTemplate = receiptTemplate ?? localReceiptTemplate;
+
+  // ── Void state ──────────────────────────────────────────────────────────
+  const [voidTarget, setVoidTarget] = useState<Transaction | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidedBy, setVoidedBy] = useState("");
+  const [voiding, setVoiding] = useState(false);
+  const [voidError, setVoidError] = useState<string | null>(null);
 
   async function loadPrintCounts() {
     try {
@@ -121,10 +133,6 @@ export function TransactionsTab({
   }, [eventId, transactions.length]);
 
   useEffect(() => {
-    /**
-     * If parent passed a template, use it.
-     * Otherwise fetch it here so printing does not fall back.
-     */
     if (receiptTemplate !== undefined) {
       setLocalReceiptTemplate(receiptTemplate ?? null);
       return;
@@ -214,7 +222,10 @@ export function TransactionsTab({
 
     const itemsForPrint: PrintTxnItem[] = items.map((item) => ({
       itemId: item.itemId,
+      baseItemNo: item.baseItemNo,
       productName: item.productName,
+      color: item.color,
+      variantCode: item.variantCode,
       quantity: Number(item.quantity),
       unitPrice: String(item.unitPrice),
       discountAmt: String(item.discountAmt),
@@ -239,6 +250,45 @@ export function TransactionsTab({
     }));
 
     await onRefresh?.();
+  }
+
+  // ── Void handlers ───────────────────────────────────────────────────────
+  function openVoidModal(txn: Transaction) {
+    setVoidTarget(txn);
+    setVoidReason("");
+    setVoidedBy("");
+    setVoidError(null);
+  }
+
+  async function confirmVoid() {
+    if (!voidTarget) return;
+
+    setVoiding(true);
+    setVoidError(null);
+
+    try {
+      const response = await fetch(`/api/transactions/${voidTarget.id}/void`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          voidedBy: voidedBy.trim() || null,
+          voidReason: voidReason.trim() || null,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "Failed to void transaction.");
+      }
+
+      setVoidTarget(null);
+      await onRefresh?.();
+    } catch (error) {
+      setVoidError(error instanceof Error ? error.message : "Failed to void transaction.");
+    } finally {
+      setVoiding(false);
+    }
   }
 
   const filtered = useMemo(() => {
@@ -360,7 +410,7 @@ export function TransactionsTab({
             <div
               className="hidden sm:grid px-4 py-2.5 text-[10px] font-bold uppercase tracking-widest"
               style={{
-                gridTemplateColumns: "1.2fr 1fr 1fr 120px 36px",
+                gridTemplateColumns: "1.2fr 1fr 1fr 120px 36px 36px",
                 background: C.muted,
                 borderBottom: `1px solid ${C.border}`,
                 color: C.mutedFg,
@@ -370,6 +420,7 @@ export function TransactionsTab({
               <div>Method</div>
               <div>Cashier</div>
               <div className="text-right">Amount</div>
+              <div />
               <div />
             </div>
 
@@ -381,25 +432,45 @@ export function TransactionsTab({
               const displayId = txn.displayId ?? txn.clientTxnId ?? `#${txn.id}`;
               const isLast = index === filtered.length - 1;
 
+              // Only the reversing entry is visually distinct. The original
+              // transaction stays looking exactly like a normal completed
+              // sale — no badge, no dimming — regardless of whether it was
+              // later voided. "Voided" state only ever shows on the new
+              // reversing entry row.
+              const isVoidEntry = !!txn.voidOfTransactionId;
+
+              // hasBeenVoided is ONLY used to hide the Void button on an
+              // already-voided original — it never drives any visual styling.
+              const hasBeenVoided = !!txn.voidedAt && !isVoidEntry;
+
               return (
                 <div
                   key={txn.id}
                   style={{
                     borderBottom: isLast ? "none" : `1px solid ${C.border}`,
+                    opacity: isVoidEntry ? 0.55 : 1,
                   }}
                 >
                   <div
                     className="hidden sm:grid px-4 py-3.5 items-center transition-colors hover:bg-black/[0.02]"
                     style={{
-                      gridTemplateColumns: "1.2fr 1fr 1fr 120px 36px",
+                      gridTemplateColumns: "1.2fr 1fr 1fr 120px 36px 36px",
                     }}
                   >
                     <div className="min-w-0 pr-3">
                       <p
-                        className="text-sm font-bold font-mono truncate"
+                        className="text-sm font-bold font-mono truncate flex items-center gap-1.5"
                         style={{ color: C.fg }}
                       >
                         {displayId}
+                        {isVoidEntry && (
+                          <span
+                            className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0"
+                            style={{ background: "rgba(220,38,38,0.1)", color: "#dc2626" }}
+                          >
+                            VOID
+                          </span>
+                        )}
                       </p>
                       <p
                         className="text-[11px] mt-0.5"
@@ -506,6 +577,22 @@ export function TransactionsTab({
                       </button>
                     </div>
 
+                    {!hasBeenVoided && !isVoidEntry ? (
+                      <button
+                        onClick={() => openVoidModal(txn)}
+                        className="w-8 h-8 rounded-xl flex items-center justify-center border justify-self-center flex-shrink-0 transition-all hover:bg-red-50"
+                        style={{
+                          borderColor: C.border,
+                          color: "#dc2626",
+                        }}
+                        title="Void this transaction"
+                      >
+                        <Ban size={13} />
+                      </button>
+                    ) : (
+                      <div />
+                    )}
+
                     <button
                       onClick={() => loadTxnItems(txn.id)}
                       className="w-8 h-8 rounded-xl flex items-center justify-center border justify-self-end transition-all hover:bg-black/5"
@@ -530,10 +617,18 @@ export function TransactionsTab({
                       onClick={() => loadTxnItems(txn.id)}
                     >
                       <p
-                        className="text-sm font-bold font-mono"
+                        className="text-sm font-bold font-mono flex items-center gap-1.5 flex-wrap"
                         style={{ color: C.fg }}
                       >
                         {displayId}
+                        {isVoidEntry && (
+                          <span
+                            className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
+                            style={{ background: "rgba(220,38,38,0.1)", color: "#dc2626" }}
+                          >
+                            VOID
+                          </span>
+                        )}
                       </p>
                       <p
                         className="text-xs mt-0.5"
@@ -560,6 +655,19 @@ export function TransactionsTab({
                       >
                         {money(txn.finalAmount)}
                       </span>
+
+                      {!hasBeenVoided && !isVoidEntry && (
+                        <button
+                          onClick={() => openVoidModal(txn)}
+                          className="w-8 h-8 rounded-xl flex items-center justify-center border"
+                          style={{
+                            borderColor: C.border,
+                            color: "#dc2626",
+                          }}
+                        >
+                          <Ban size={13} />
+                        </button>
+                      )}
 
                       <button
                         onClick={() => handlePrint(txn)}
@@ -604,6 +712,18 @@ export function TransactionsTab({
                           <strong style={{ color: C.fg }}>
                             {txn.cashierName}
                           </strong>
+                        </p>
+                      )}
+
+                      {/* Void reason only shows on the reversing entry —
+                          the original never surfaces void info here. */}
+                      {isVoidEntry && txn.voidReason && (
+                        <p
+                          className="text-[11px] mb-2.5"
+                          style={{ color: "#dc2626" }}
+                        >
+                          Void reason: <strong>{txn.voidReason}</strong>
+                          {txn.voidedBy ? ` — by ${txn.voidedBy}` : ""}
                         </p>
                       )}
 
@@ -666,6 +786,109 @@ export function TransactionsTab({
           </div>
         )}
       </div>
+
+      {voidTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(15,10,40,0.45)", backdropFilter: "blur(4px)" }}
+        >
+          <div
+            className="rounded-2xl border w-full max-w-md shadow-2xl"
+            style={{ background: C.card, borderColor: C.border }}
+          >
+            <div
+              className="flex items-center justify-between px-5 py-4 border-b"
+              style={{ borderColor: C.border }}
+            >
+              <h2 className="font-bold" style={{ color: C.fg }}>
+                Void Transaction
+              </h2>
+              <button
+                onClick={() => setVoidTarget(null)}
+                className="p-1.5 rounded-lg"
+                style={{ background: C.muted, color: C.mutedFg }}
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3">
+              <p className="text-sm" style={{ color: C.mutedFg }}>
+                This will reverse{" "}
+                <strong style={{ color: C.fg }}>
+                  {voidTarget.displayId ?? voidTarget.clientTxnId ?? `#${voidTarget.id}`}
+                </strong>
+                , return all its items to stock, and remove it from revenue totals. This
+                cannot be undone.
+              </p>
+
+              <div>
+                <label
+                  className="block text-[10px] font-semibold uppercase tracking-wider mb-1"
+                  style={{ color: C.mutedFg }}
+                >
+                  Voided by
+                </label>
+                <input
+                  value={voidedBy}
+                  onChange={(e) => setVoidedBy(e.target.value)}
+                  placeholder="Your name"
+                  className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400"
+                  style={{ borderColor: C.border, color: C.fg, background: C.card }}
+                />
+              </div>
+
+              <div>
+                <label
+                  className="block text-[10px] font-semibold uppercase tracking-wider mb-1"
+                  style={{ color: C.mutedFg }}
+                >
+                  Reason (optional)
+                </label>
+                <textarea
+                  value={voidReason}
+                  onChange={(e) => setVoidReason(e.target.value)}
+                  rows={2}
+                  placeholder="E.g. wrong item scanned, customer changed mind"
+                  className="w-full rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-orange-400 resize-none"
+                  style={{ borderColor: C.border, color: C.fg, background: C.card }}
+                />
+              </div>
+
+              {voidError && (
+                <div
+                  className="text-xs font-semibold px-3 py-2 rounded-xl"
+                  style={{ background: "rgba(220,38,38,0.08)", color: "#dc2626" }}
+                >
+                  {voidError}
+                </div>
+              )}
+            </div>
+
+            <div
+              className="flex gap-2 justify-end px-5 py-4 border-t"
+              style={{ borderColor: C.border, background: C.muted }}
+            >
+              <button
+                onClick={() => setVoidTarget(null)}
+                disabled={voiding}
+                className="px-4 py-2 rounded-xl text-sm font-bold border"
+                style={{ borderColor: C.border, color: C.fg, background: C.card }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmVoid}
+                disabled={voiding}
+                className="px-4 py-2 rounded-xl text-sm font-bold disabled:opacity-50"
+                style={{ background: "#dc2626", color: "white" }}
+              >
+                {voiding ? "Voiding…" : "Void Transaction"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

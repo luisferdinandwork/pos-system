@@ -2,6 +2,22 @@
 import { db } from "@/lib/db";
 import { events, eventItems } from "@/lib/db/schema";
 import { eq, sql } from "drizzle-orm";
+import {
+  normalizeEventCode,
+  EVENT_COMPANIES,
+  isEventCompany,
+  getEventCodePrefix,
+  inferEventCompany,
+  type EventCompany,
+} from "@/lib/transaction-ids";
+
+export {
+  EVENT_COMPANIES,
+  isEventCompany,
+  getEventCodePrefix,
+  inferEventCompany,
+  type EventCompany,
+};
 
 export type Event = typeof events.$inferSelect;
 export type NewEvent = typeof events.$inferInsert;
@@ -39,7 +55,7 @@ export type EventStatus = (typeof EVENT_STATUSES)[number]["value"];
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CreateEventInput = {
-  code: string;
+  company: EventCompany;
   name: string;
   verifierCode?: string | null;
   location?: string | null;
@@ -49,10 +65,11 @@ export type CreateEventInput = {
   endDate?: Date | string | null;
 };
 
-export type UpdateEventInput = Partial<CreateEventInput>;
+// Event code and company are immutable after creation.
+export type UpdateEventInput = Partial<Omit<CreateEventInput, "company">>;
 
-type CreateEventPayload = {
-  code: string;
+export type CreateEventPayload = {
+  company: EventCompany;
   verifierCode: string;
   name: string;
   location: string | null;
@@ -63,7 +80,7 @@ type CreateEventPayload = {
   updatedAt: Date;
 };
 
-type UpdateEventPayload = Partial<CreateEventPayload>;
+type UpdateEventPayload = Partial<Omit<CreateEventPayload, "company">>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -76,16 +93,6 @@ function normalizeText(value: unknown): string {
 function normalizeNullableText(value: unknown): string | null {
   const text = normalizeText(value);
   return text || null;
-}
-
-export function normalizeEventCode(code: string): string {
-  const normalized = normalizeText(code);
-
-  if (!/^\d{4}$/.test(normalized)) {
-    throw new Error("Event code must be exactly 4 digits.");
-  }
-
-  return normalized;
 }
 
 export function generateEventVerifierCode(): string {
@@ -119,6 +126,14 @@ function assertValidEventStatus(status: string): string {
   return normalized;
 }
 
+function assertValidEventCompany(company: unknown): EventCompany {
+  if (!isEventCompany(company)) {
+    throw new Error(`Invalid company "${String(company)}". Must be PRI or PNT.`);
+  }
+
+  return company;
+}
+
 function normalizeEventCreatePayload(data: CreateEventInput): CreateEventPayload {
   const name = normalizeText(data.name);
 
@@ -129,7 +144,7 @@ function normalizeEventCreatePayload(data: CreateEventInput): CreateEventPayload
   const verifierCode = normalizeText(data.verifierCode);
 
   return {
-    code: normalizeEventCode(data.code),
+    company: assertValidEventCompany(data.company),
     verifierCode: verifierCode || generateEventVerifierCode(),
     name,
     location: normalizeNullableText(data.location),
@@ -145,10 +160,6 @@ function normalizeEventUpdatePayload(data: UpdateEventInput): UpdateEventPayload
   const payload: UpdateEventPayload = {
     updatedAt: new Date(),
   };
-
-  if (data.code !== undefined) {
-    payload.code = normalizeEventCode(data.code);
-  }
 
   if (data.verifierCode !== undefined) {
     const verifierCode = normalizeText(data.verifierCode);
@@ -239,18 +250,85 @@ export async function getEventByVerifierCode(
   return event ?? null;
 }
 
-export async function createEvent(data: CreateEventInput): Promise<Event> {
-  const payload = normalizeEventCreatePayload(data);
+const MAX_CODE_GENERATION_ATTEMPTS = 5;
 
-  const existingCode = await getEventByCode(payload.code);
+/**
+ * Finds the next available event code for a company by looking at the
+ * highest existing code sharing that company's prefix (EVTA.../EVTB...)
+ * and incrementing its numeric suffix.
+ */
+export async function generateNextEventCode(
+  company: EventCompany
+): Promise<string> {
+  const prefix = getEventCodePrefix(company);
 
-  if (existingCode) {
-    throw new Error(`Event code "${payload.code}" is already used.`);
+  const [row] = await db
+    .select({ maxCode: sql<string | null>`max(${events.code})` })
+    .from(events)
+    .where(sql`${events.code} like ${prefix + "%"}`);
+
+  const match = row?.maxCode ? /^EVT[AB](\d{5})$/.exec(row.maxCode) : null;
+  const nextSeq = (match ? Number(match[1]) : 0) + 1;
+
+  if (nextSeq > 99999) {
+    throw new Error(`No more event codes available for company "${company}".`);
   }
 
-  const [event] = await db.insert(events).values(payload).returning();
+  return `${prefix}${String(nextSeq).padStart(5, "0")}`;
+}
 
-  return event;
+function isEventCodeUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+
+  const err = error as { code?: string; constraint?: string; message?: string };
+
+  return (
+    err.code === "23505" ||
+    err.constraint === "events_code_unique" ||
+    Boolean(err.message?.includes("events_code_unique"))
+  );
+}
+
+/**
+ * Inserts a new event row, generating its code from the company right
+ * before insert and retrying on a rare code collision (the code lookup
+ * isn't lock-protected, matching the same low-risk gap already present
+ * in lib/transactions.ts generateDisplayId()).
+ */
+export async function insertEventWithGeneratedCode(
+  company: EventCompany,
+  rest: Omit<CreateEventPayload, "company">
+): Promise<Event> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < MAX_CODE_GENERATION_ATTEMPTS; attempt++) {
+    const code = await generateNextEventCode(company);
+
+    try {
+      const [event] = await db
+        .insert(events)
+        .values({ ...rest, code, company })
+        .returning();
+
+      return event;
+    } catch (error) {
+      if (!isEventCodeUniqueViolation(error)) {
+        throw error;
+      }
+
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to generate a unique event code.");
+}
+
+export async function createEvent(data: CreateEventInput): Promise<Event> {
+  const { company, ...rest } = normalizeEventCreatePayload(data);
+
+  return insertEventWithGeneratedCode(company, rest);
 }
 
 export async function updateEvent(
@@ -258,14 +336,6 @@ export async function updateEvent(
   data: UpdateEventInput
 ): Promise<Event> {
   const payload = normalizeEventUpdatePayload(data);
-
-  if (payload.code) {
-    const existingCode = await getEventByCode(payload.code);
-
-    if (existingCode && existingCode.id !== id) {
-      throw new Error(`Event code "${payload.code}" is already used.`);
-    }
-  }
 
   const [event] = await db
     .update(events)
@@ -515,5 +585,10 @@ export function getEventStatusLabel(status: string): string {
 }
 
 export function isValidEventCode(code: string): boolean {
-  return /^\d{4}$/.test(normalizeText(code));
+  try {
+    normalizeEventCode(code);
+    return true;
+  } catch {
+    return false;
+  }
 }
