@@ -1,5 +1,5 @@
 // lib/local-pos.ts
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { localDb } from "@/lib/local-db";
 import {
   localEvents,
@@ -16,10 +16,15 @@ import {
 import { getAllEvents, getEventItems } from "@/lib/events";
 import { getPromosByEvent } from "@/lib/promos";
 import { getActivePaymentMethods } from "@/lib/payment-methods";
-import { createTransaction, setReceiptPrintCountAtLeast } from "@/lib/transactions";
+import {
+  createTransaction,
+  setReceiptPrintCountAtLeast,
+  voidTransaction,
+} from "@/lib/transactions";
 import {
   formatEventTransactionDisplayId,
   getTransactionMonthPrefix,
+  normalizeEventCode,
   parseEventTransactionSequence,
 } from "@/lib/transaction-ids";
 import { db } from "@/lib/db";
@@ -52,9 +57,15 @@ export type LocalTransactionPayload = {
   cashTendered?: number | null;
   changeAmount?: number | null;
   cashierSessionId?: number | null;
-  // Cashier name stamped at sale time — survives even before session sync
   cashierName?: string | null;
   createdAt?: string;
+};
+
+export type VoidLocalTransactionResult = {
+  clientTxnId: string;
+  voidedAt: string;
+  cloudVoided: boolean;
+  cloudError?: string;
 };
 
 function nowIso() {
@@ -80,13 +91,19 @@ export function getLocalEventCode(eventId: number) {
     .limit(1)
     .get();
 
-  if (!event?.code || !/^\d{4}$/.test(event.code)) {
+  if (!event?.code) {
     throw new Error(
-      "Local event is missing the 4-digit event code. Prepare the event offline again."
+      "Local event is missing its event code. Prepare the event offline again."
     );
   }
 
-  return event.code;
+  try {
+    return normalizeEventCode(event.code);
+  } catch {
+    throw new Error(
+      "Local event has an invalid event code. Prepare the event offline again."
+    );
+  }
 }
 
 export function generateLocalDisplayId(eventId: number, date = new Date()) {
@@ -105,6 +122,23 @@ export function generateLocalDisplayId(eventId: number, date = new Date()) {
     .reduce((max, displayId) => Math.max(max, parseEventTransactionSequence(displayId)), 0);
 
   return formatEventTransactionDisplayId(eventCode, date, lastSeq + 1);
+}
+
+// better-sqlite3 rejects a single statement once its bound parameter count
+// crosses SQLite's variable limit (999 on many builds). Bulk inserts built
+// from `array.map(...)` scale params as rows * columns, so wide tables with
+// enough rows (e.g. an event with 100+ items) can blow past that — chunk
+// them into batches that stay safely under the limit regardless of column count.
+const SQLITE_INSERT_BATCH_SIZE = 50;
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+
+  return chunks;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,6 +164,22 @@ export async function prepareEventOffline(eventId: number) {
     tx.delete(localEventItems).where(eq(localEventItems.eventId, eventId)).run();
     tx.delete(localEvents).where(eq(localEvents.id, eventId)).run();
 
+    // Event item/promo ids mirror the cloud DB's global serial ids. If the
+    // cloud DB was reset and reseeded, those serials can restart and collide
+    // with stale rows still cached locally under a different event id — purge
+    // any such leftovers before inserting so the id-based primary keys stay valid.
+    for (const chunk of chunkArray(items.map((item) => item.id), SQLITE_INSERT_BATCH_SIZE)) {
+      if (chunk.length > 0) {
+        tx.delete(localEventItems).where(inArray(localEventItems.id, chunk)).run();
+      }
+    }
+
+    for (const chunk of chunkArray(promos.map((promo) => promo.id), SQLITE_INSERT_BATCH_SIZE)) {
+      if (chunk.length > 0) {
+        tx.delete(localPromos).where(inArray(localPromos.id, chunk)).run();
+      }
+    }
+
     tx.insert(localEvents)
       .values({
         id: event.id,
@@ -145,10 +195,10 @@ export async function prepareEventOffline(eventId: number) {
       })
       .run();
 
-    if (items.length > 0) {
+    for (const chunk of chunkArray(items, SQLITE_INSERT_BATCH_SIZE)) {
       tx.insert(localEventItems)
         .values(
-          items.map((item) => ({
+          chunk.map((item) => ({
             id: item.id,
             eventId: item.eventId,
             itemId: item.itemId,
@@ -166,10 +216,10 @@ export async function prepareEventOffline(eventId: number) {
         .run();
     }
 
-    if (promos.length > 0) {
+    for (const chunk of chunkArray(promos, SQLITE_INSERT_BATCH_SIZE)) {
       tx.insert(localPromos)
         .values(
-          promos.map((promo) => ({
+          chunk.map((promo) => ({
             id: promo.id,
             eventId,
             name: promo.name,
@@ -181,10 +231,10 @@ export async function prepareEventOffline(eventId: number) {
 
     tx.delete(localPaymentMethods).run();
 
-    if (paymentMethods.length > 0) {
+    for (const chunk of chunkArray(paymentMethods, SQLITE_INSERT_BATCH_SIZE)) {
       tx.insert(localPaymentMethods)
         .values(
-          paymentMethods.map((method) => ({
+          chunk.map((method) => ({
             id: method.id,
             name: method.name,
             type: method.type,
@@ -336,22 +386,24 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
       .returning()
       .get();
 
-    tx.insert(localTransactionItems)
-      .values(
-        payload.items.map((item) => ({
-          clientTxnId: payload.clientTxnId,
-          eventItemId: item.eventItemId,
-          itemId: item.itemId,
-          productName: item.productName,
-          quantity: Number(item.quantity),
-          unitPrice: String(item.unitPrice),
-          discountAmt: String(item.discountAmt),
-          finalPrice: String(item.finalPrice),
-          subtotal: String(item.subtotal),
-          promoApplied: item.promoApplied ?? null,
-        }))
-      )
-      .run();
+    for (const chunk of chunkArray(payload.items, SQLITE_INSERT_BATCH_SIZE)) {
+      tx.insert(localTransactionItems)
+        .values(
+          chunk.map((item) => ({
+            clientTxnId: payload.clientTxnId,
+            eventItemId: item.eventItemId,
+            itemId: item.itemId,
+            productName: item.productName,
+            quantity: Number(item.quantity),
+            unitPrice: String(item.unitPrice),
+            discountAmt: String(item.discountAmt),
+            finalPrice: String(item.finalPrice),
+            subtotal: String(item.subtotal),
+            promoApplied: item.promoApplied ?? null,
+          }))
+        )
+        .run();
+    }
 
     tx.insert(localSyncLogs)
       .values({
@@ -368,13 +420,117 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cashier session helpers
+// Void local transaction
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Returns the most recent open (unclosed) local cashier session for an event,
- * or null if none exists.
+ * Voids a local transaction. Always restocks local_event_items immediately
+ * regardless of connectivity. If the transaction was already synced to Neon
+ * (serverTransactionId is set), also voids it there — which is where the real
+ * reversing ledger entry (transactions row + stock_transactions row) lives.
+ *
+ * If the cloud void fails (e.g. offline), the local void still stands but
+ * cloud data will be out of sync until this is retried — there is currently
+ * no automatic retry queue for this, only for normal sale sync.
  */
+export async function voidLocalTransaction(
+  clientTxnId: string,
+  options: { voidedBy?: string | null; voidReason?: string | null } = {}
+): Promise<VoidLocalTransactionResult> {
+  const original = localDb
+    .select()
+    .from(localTransactions)
+    .where(eq(localTransactions.clientTxnId, clientTxnId))
+    .limit(1)
+    .get();
+
+  if (!original) {
+    throw new Error(`Local transaction "${clientTxnId}" not found.`);
+  }
+
+  if ((original as any).status === "voided") {
+    throw new Error("Transaction is already voided.");
+  }
+
+  const items = localDb
+    .select()
+    .from(localTransactionItems)
+    .where(eq(localTransactionItems.clientTxnId, clientTxnId))
+    .all();
+
+  const now = nowIso();
+
+  localDb.transaction((tx) => {
+    tx.update(localTransactions)
+      .set({
+        status: "voided",
+        voidedAt: now,
+        voidedBy: options.voidedBy ?? null,
+        voidReason: options.voidReason ?? null,
+      } as any)
+      .where(eq(localTransactions.clientTxnId, clientTxnId))
+      .run();
+
+    for (const item of items) {
+      const localItem = tx
+        .select()
+        .from(localEventItems)
+        .where(eq(localEventItems.id, item.eventItemId))
+        .limit(1)
+        .get();
+
+      if (localItem) {
+        const nextStock = Number(localItem.stock ?? 0) + Math.abs(item.quantity);
+
+        tx.update(localEventItems)
+          .set({ stock: nextStock })
+          .where(eq(localEventItems.id, item.eventItemId))
+          .run();
+      }
+    }
+
+    tx.insert(localSyncLogs)
+      .values({
+        eventId: original.eventId,
+        message: `Voided local transaction ${clientTxnId}${
+          options.voidReason ? `: ${options.voidReason}` : ""
+        }`,
+        createdAt: now,
+      })
+      .run();
+  });
+
+  if (!original.serverTransactionId) {
+    return { clientTxnId, voidedAt: now, cloudVoided: false };
+  }
+
+  try {
+    await voidTransaction(Number(original.serverTransactionId), {
+      voidedBy: options.voidedBy ?? null,
+      voidReason: options.voidReason ?? null,
+    });
+
+    return { clientTxnId, voidedAt: now, cloudVoided: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to void on cloud.";
+
+    localDb
+      .insert(localSyncLogs)
+      .values({
+        eventId: original.eventId,
+        message: `Cloud void failed for ${clientTxnId}: ${message}`,
+        createdAt: nowIso(),
+      })
+      .run();
+
+    return { clientTxnId, voidedAt: now, cloudVoided: false, cloudError: message };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cashier session helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function getActiveLocalCashierSession(eventId: number) {
   return (
     localDb
@@ -392,9 +548,6 @@ export function getActiveLocalCashierSession(eventId: number) {
   );
 }
 
-/**
- * Opens a new local cashier session. Returns the created row.
- */
 export function openLocalCashierSession(
   eventId: number,
   cashierName: string,
@@ -413,9 +566,6 @@ export function openLocalCashierSession(
     .get();
 }
 
-/**
- * Closes a local cashier session by id.
- */
 export function closeLocalCashierSession(
   sessionId: number,
   closingCash?: number,
@@ -501,8 +651,24 @@ export async function getLocalTransactionByClientTxnId(clientTxnId: string) {
 
 export async function getLocalTransactionItems(clientTxnId: string) {
   return localDb
-    .select()
+    .select({
+      id: localTransactionItems.id,
+      clientTxnId: localTransactionItems.clientTxnId,
+      eventItemId: localTransactionItems.eventItemId,
+      itemId: localTransactionItems.itemId,
+      baseItemNo: localEventItems.baseItemNo,
+      productName: localTransactionItems.productName,
+      color: localEventItems.color,
+      variantCode: localEventItems.variantCode,
+      quantity: localTransactionItems.quantity,
+      unitPrice: localTransactionItems.unitPrice,
+      discountAmt: localTransactionItems.discountAmt,
+      finalPrice: localTransactionItems.finalPrice,
+      subtotal: localTransactionItems.subtotal,
+      promoApplied: localTransactionItems.promoApplied,
+    })
     .from(localTransactionItems)
+    .leftJoin(localEventItems, eq(localTransactionItems.eventItemId, localEventItems.id))
     .where(eq(localTransactionItems.clientTxnId, clientTxnId))
     .orderBy(localTransactionItems.id)
     .all();
@@ -515,7 +681,10 @@ export async function getUnsyncedLocalTransactions(eventId: number) {
     .where(
       and(
         eq(localTransactions.eventId, eventId),
-        inArray(localTransactions.syncStatus, ["pending", "failed"])
+        inArray(localTransactions.syncStatus, ["pending", "failed"]),
+        // A local sale that was voided before it ever synced has nothing
+        // left to push — exclude it from the sync queue.
+        ne(localTransactions.status, "voided")
       )
     )
     .orderBy(localTransactions.createdAt)
@@ -637,7 +806,6 @@ export async function syncLocalReceiptPrintCountsToNeon(eventId: number) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sync cashier sessions to Neon
-// Must run BEFORE syncing transactions so serverSessionId FK can be resolved.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function syncLocalCashierSessionsToNeon(eventId: number) {
@@ -727,7 +895,6 @@ export async function syncLocalCashDrawerCountsToNeon(eventId: number) {
 
   for (const count of pending) {
     try {
-      // Resolve server session id from the local session, if applicable
       let serverSessionId: number | null = null;
 
       if (count.cashierSessionId) {
@@ -786,14 +953,11 @@ export async function syncLocalCashDrawerCountsToNeon(eventId: number) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sync local SQLite transactions to Neon
-// Order: sessions → transactions → drawer counts → receipt print counts
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function syncLocalTransactionsToNeon(eventId: number) {
-  // 1. Sync cashier sessions first so we have serverSessionId for transactions
   const sessionSync = await syncLocalCashierSessionsToNeon(eventId);
 
-  // 2. Build a local-id → server-id map for resolved sessions
   const sessionRows = localDb
     .select()
     .from(localCashierSessions)
@@ -805,7 +969,6 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
     if (s.serverSessionId) sessionMap.set(s.id, s.serverSessionId);
   }
 
-  // 3. Sync pending transactions
   const pending = await getUnsyncedLocalTransactions(eventId);
 
   const results: {
@@ -824,7 +987,6 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
         throw new Error("Local transaction has no items.");
       }
 
-      // Resolve server cashier session id (null for anonymous / unsynced sessions)
       const serverCashierSessionId =
         txn.cashierSessionId != null
           ? (sessionMap.get(txn.cashierSessionId) ?? null)
@@ -923,10 +1085,7 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
     }
   }
 
-  // 4. Sync cash drawer counts (after sessions so FK resolves)
   const drawerSync = await syncLocalCashDrawerCountsToNeon(eventId);
-
-  // 5. Sync receipt print counts for any newly-synced transactions
   const receiptPrintSync = await syncLocalReceiptPrintCountsToNeon(eventId);
 
   return {

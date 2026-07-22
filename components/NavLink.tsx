@@ -5,13 +5,14 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Package, Wallet, CalendarDays,
   Receipt, Warehouse, ShoppingCart, Settings2, Zap,
-  ChevronRight,
+  ChevronRight, ScanLine,
   Users,
 } from "lucide-react";
 
 // ── Nav structure ─────────────────────────────────────────────────────────────
-// Two clear zones:
+// Three zones:
 //   SETUP   — configure the system (do this before events)
+//   TOOLS   — standalone utilities (e.g. price check scanner)
 //   LIVE    — use during an active event
 
 const SETUP_ITEMS = [
@@ -20,6 +21,10 @@ const SETUP_ITEMS = [
   { href: "/products",        label: "Products",        icon: Package         },
   { href: "/payment-methods", label: "Payment Methods", icon: Wallet          },
   { href: "/users",           label: "Users",           icon: Users           },
+] as const;
+
+const TOOL_ITEMS = [
+  { href: "/price-check", label: "Price Check", icon: ScanLine },
 ] as const;
 
 // const LIVE_ITEMS = [
@@ -99,6 +104,21 @@ export default function NavLinks() {
       </div>
 
       {SETUP_ITEMS.map((item) => (
+        <NavItem key={item.href} {...item} />
+      ))}
+
+      {/* ── Divider ────────────────────────────────────────────────────────── */}
+      <div className="mx-3 my-2 h-px" style={{ background: "rgba(255,255,255,0.08)" }} />
+
+      {/* ── TOOLS section ──────────────────────────────────────────────────── */}
+      <div className="px-3 pb-0.5">
+        <p className="text-[10px] font-bold uppercase tracking-[0.14em]"
+          style={{ color: "rgba(255,255,255,0.28)" }}>
+          Tools
+        </p>
+      </div>
+
+      {TOOL_ITEMS.map((item) => (
         <NavItem key={item.href} {...item} />
       ))}
 

@@ -90,6 +90,9 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_local_transactions_server_transaction_id
       ON local_transactions(server_transaction_id);
 
+    CREATE INDEX IF NOT EXISTS idx_local_transactions_status
+      ON local_transactions(status);
+
     CREATE INDEX IF NOT EXISTS idx_local_transaction_items_client_txn_id
       ON local_transaction_items(client_txn_id);
 
@@ -181,7 +184,11 @@ export function initLocalDb() {
       sync_status           TEXT NOT NULL DEFAULT 'pending',
       server_transaction_id INTEGER,
       sync_error            TEXT,
-      receipt_print_count   INTEGER NOT NULL DEFAULT 0
+      receipt_print_count   INTEGER NOT NULL DEFAULT 0,
+      status                TEXT NOT NULL DEFAULT 'completed',
+      voided_at             TEXT,
+      voided_by             TEXT,
+      void_reason           TEXT
     );
 
     CREATE TABLE IF NOT EXISTS local_transaction_items (
@@ -286,6 +293,30 @@ export function initLocalDb() {
     "local_transactions",
     "receipt_print_count",
     `ALTER TABLE local_transactions ADD COLUMN receipt_print_count INTEGER NOT NULL DEFAULT 0`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "status",
+    `ALTER TABLE local_transactions ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "voided_at",
+    `ALTER TABLE local_transactions ADD COLUMN voided_at TEXT`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "voided_by",
+    `ALTER TABLE local_transactions ADD COLUMN voided_by TEXT`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "void_reason",
+    `ALTER TABLE local_transactions ADD COLUMN void_reason TEXT`
   );
 
   addColumnIfMissing(

@@ -5,6 +5,7 @@ import {
   createEvent,
   updateEvent,
   deleteEvent,
+  isEventCompany,
   type CreateEventInput,
   type UpdateEventInput,
 } from "@/lib/events";
@@ -39,19 +40,20 @@ function toOptionalString(val: unknown): string | undefined {
 }
 
 function parseCreateEventBody(body: Record<string, unknown>): CreateEventInput {
-  const code = String(body.code ?? "").trim();
-  const name = String(body.name ?? "").trim();
+  const company = body.company;
 
-  if (!/^\d{4}$/.test(code)) {
-    throw new Error("Event code must be exactly 4 digits.");
+  if (!isEventCompany(company)) {
+    throw new Error('Company is required and must be "PRI" or "PNT".');
   }
+
+  const name = String(body.name ?? "").trim();
 
   if (!name) {
     throw new Error("Event name is required.");
   }
 
   return {
-    code,
+    company,
     name,
     verifierCode: toNullableString(body.verifierCode),
     location: toNullableString(body.location),
@@ -65,23 +67,11 @@ function parseCreateEventBody(body: Record<string, unknown>): CreateEventInput {
 function parseUpdateEventBody(body: Record<string, unknown>): UpdateEventInput {
   const payload: UpdateEventInput = {};
 
-  if (body.code !== undefined) {
-    const code = String(body.code ?? "").trim();
-
-    if (!/^\d{4}$/.test(code)) {
-      throw new Error("Event code must be exactly 4 digits.");
-    }
-
-    payload.code = code;
-  }
-
   if (body.name !== undefined) {
     const name = String(body.name ?? "").trim();
-
     if (!name) {
       throw new Error("Event name is required.");
     }
-
     payload.name = name;
   }
 

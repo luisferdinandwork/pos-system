@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 
 // ── Events ────────────────────────────────────────────────────────────────────
 export const events = pgTable(
@@ -17,6 +18,7 @@ export const events = pgTable(
   {
     id: serial("id").primaryKey(),
     code: text("code").notNull(),
+    company: text("company"),
     verifierCode: text("verifier_code").notNull(),
 
     name: text("name").notNull(),
@@ -145,31 +147,22 @@ export const stockTransactions = pgTable(
 );
 
 // ── EDC Machines ──────────────────────────────────────────────────────────────
-// Each physical EDC terminal. Bank name is the top-level grouping.
-// Each machine supports one or more methods (debit, credit, qris).
 export const edcMachines = pgTable("edc_machines", {
   id:         serial("id").primaryKey(),
-  bankName:   text("bank_name").notNull(),          // e.g. "BCA", "Mandiri", "BNI"
-  terminalId: text("terminal_id"),                  // optional: TID printed on EDC
-  label:      text("label").notNull(),              // e.g. "EDC BCA", "EDC Mandiri"
+  bankName:   text("bank_name").notNull(),
+  terminalId: text("terminal_id"),
+  label:      text("label").notNull(),
   isActive:   boolean("is_active").notNull().default(true),
   sortOrder:  integer("sort_order").notNull().default(0),
   createdAt:  timestamp("created_at").defaultNow(),
 });
 
 // ── Payment Methods ───────────────────────────────────────────────────────────
-// type hierarchy:
-//   cash → standalone
-//   edc  → child of an edcMachine row; sub-types: debit | credit | qris
-// Standalone qris and ewallet were removed from the app flow.
 export const paymentMethods = pgTable("payment_methods", {
   id:          serial("id").primaryKey(),
   name:        text("name").notNull(),
-  // top-level type: "cash" | "edc"
   type:        text("type").notNull(),
-  // for EDC children: "debit" | "credit" | "qris"
   edcMethod:   text("edc_method"),
-  // FK to edc_machines — set for all EDC sub-methods
   edcMachineId: integer("edc_machine_id")
     .references(() => edcMachines.id, { onDelete: "set null" }),
   provider:    text("provider"),
@@ -180,15 +173,12 @@ export const paymentMethods = pgTable("payment_methods", {
 });
 
 // ── Cashier Sessions ──────────────────────────────────────────────────────────
-// Tracks who is at the register per event, and their opening cash float.
 export const cashierSessions = pgTable("cashier_sessions", {
   id:             serial("id").primaryKey(),
   eventId:        integer("event_id").notNull()
     .references(() => events.id, { onDelete: "cascade" }),
   cashierName:    text("cashier_name").notNull(),
-  // Cash float at the start of the session
   openingCash:    numeric("opening_cash", { precision: 12, scale: 2 }).notNull().default("0"),
-  // Closing cash entered at end of session (optional — filled when session ends)
   closingCash:    numeric("closing_cash", { precision: 12, scale: 2 }),
   openedAt:       timestamp("opened_at").defaultNow(),
   closedAt:       timestamp("closed_at"),
@@ -196,11 +186,7 @@ export const cashierSessions = pgTable("cashier_sessions", {
   createdAt:      timestamp("created_at").defaultNow(),
 });
 
-
 // ── Cash Drawer Counts ───────────────────────────────────────────────────────
-// Tracks physical drawer cash checks during a cashier session.
-// This is different from cashier_sessions: sessions store opening/closing data,
-// while this table stores every count/check cashiers perform during the day.
 export const cashDrawerCounts = pgTable(
   "cash_drawer_counts",
   {
@@ -210,13 +196,10 @@ export const cashDrawerCounts = pgTable(
     cashierSessionId: integer("cashier_session_id")
       .references(() => cashierSessions.id, { onDelete: "set null" }),
     countedBy:        text("counted_by"),
-    // Expected cash from system: opening cash + cash sales - cash change/outflow
     expectedCash:     numeric("expected_cash", { precision: 12, scale: 2 }).notNull().default("0"),
-    // Physical cash counted in drawer
     actualCash:       numeric("actual_cash",   { precision: 12, scale: 2 }).notNull().default("0"),
-    // actualCash - expectedCash
     difference:       numeric("difference",    { precision: 12, scale: 2 }).notNull().default("0"),
-    reason:           text("reason").notNull().default("count"), // opening_check | count | closing_check
+    reason:           text("reason").notNull().default("count"),
     notes:            text("notes"),
     countedAt:        timestamp("counted_at").defaultNow(),
     createdAt:        timestamp("created_at").defaultNow(),
@@ -228,8 +211,6 @@ export const cashDrawerCounts = pgTable(
 );
 
 // ── Event Receipt Templates ──────────────────────────────────────────────────
-// One receipt CMS/config per event. POS and history receipt printing can load
-// this setting to customize each event receipt independently.
 export const eventReceiptTemplates = pgTable(
   "event_receipt_templates",
   {
@@ -274,15 +255,13 @@ export const transactions = pgTable(
     id:        serial("id").primaryKey(),
 
     // Official transaction number shown to users/receipts/reports.
-    // Format: 0000YYYYMM00000 where the first 0000 is events.code.
-    // Example: 120720260500001.
+    // Format: LLLNNNNN-YYYYMM-SSSSS where LLLNNNNN is events.code.
+    // Example: JSE00001-202607-00001.
     displayId: text("display_id").notNull(),
 
     eventId:   integer("event_id").notNull()
       .references(() => events.id, { onDelete: "cascade" }),
 
-    // Stable idempotency key from POS/local POS.
-    // Offline/local transactions must send this when syncing to avoid duplicates.
     clientTxnId: text("client_txn_id").unique(),
 
     cashierSessionId: integer("cashier_session_id")
@@ -297,9 +276,19 @@ export const transactions = pgTable(
     paymentMethod:    text("payment_method"),
     paymentReference: text("payment_reference"),
 
-    // Total receipt prints stored directly on the transaction.
-    // This replaces needing to calculate from receipt_print_logs for POS/history.
     receiptPrintCount: integer("receipt_print_count").notNull().default(0),
+
+    // ── Void tracking ──────────────────────────────────────────────────────
+    // status: "completed" (normal sale) | "voided" (original, now reversed)
+    //         | "void_entry" (the negative reversing row itself)
+    status: text("status").notNull().default("completed"),
+    voidedAt: timestamp("voided_at"),
+    voidedBy: text("voided_by"),
+    voidReason: text("void_reason"),
+    // Set only on the reversing ("void_entry") row — points back to the
+    // original transaction it reverses.
+    voidOfTransactionId: integer("void_of_transaction_id")
+      .references((): AnyPgColumn => transactions.id, { onDelete: "set null" }),
 
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),
@@ -308,6 +297,7 @@ export const transactions = pgTable(
     displayUnique: uniqueIndex("transactions_display_id_unique").on(table.displayId),
     eventIdx:      index("transactions_event_idx").on(table.eventId),
     createdAtIdx:  index("transactions_created_at_idx").on(table.createdAt),
+    voidOfIdx:     index("transactions_void_of_idx").on(table.voidOfTransactionId),
   })
 );
 
@@ -329,15 +319,12 @@ export const transactionItems = pgTable("transaction_items", {
 });
 
 // ── Receipt Print Logs ────────────────────────────────────────────────────────
-// LEGACY/AUDIT ONLY. New POS code should update transactions.receiptPrintCount directly.
 export const receiptPrintLogs = pgTable("receipt_print_logs", {
   id:            serial("id").primaryKey(),
   transactionId: integer("transaction_id").notNull()
     .references(() => transactions.id, { onDelete: "cascade" }),
-  // "original" | "reprint"
   printType:     text("print_type").notNull().default("reprint"),
   printedAt:     timestamp("printed_at").defaultNow(),
-  // Optional: which device/cashier triggered the print
   printedBy:     text("printed_by"),
 });
 
@@ -364,8 +351,6 @@ export const authUsers = pgTable("auth_users", {
 });
 
 // ── Auth User Event Assignments ───────────────────────────────────────────────
-// Many-to-many assignment table: one cashier can work on many events.
-// auth_users.event_id is kept as a legacy/default event fallback.
 export const authUserEvents = pgTable(
   "auth_user_events",
   {
@@ -388,4 +373,3 @@ export const authUserEvents = pgTable(
     eventIdx: index("auth_user_events_event_idx").on(table.eventId),
   })
 );
-

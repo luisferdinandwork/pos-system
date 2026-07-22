@@ -9,6 +9,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  ScanLine,
   Trash2,
   User,
   UserPlus,
@@ -110,6 +111,34 @@ type Props = {
 // ─── Tab type ────────────────────────────────────────────────────────────────
 
 type Tab = "assign" | "create";
+type NewUserRole = "user" | "price_checker";
+
+// ─── Role display helpers ────────────────────────────────────────────────────
+
+function roleLabel(role: string): string {
+  if (role === "admin") return "Admin";
+  if (role === "price_checker") return "Price Checker";
+  return "Cashier";
+}
+
+function roleBadgeStyle(role: string) {
+  if (role === "price_checker") {
+    return {
+      background: "rgba(124,58,237,0.08)",
+      color: "#7c3aed",
+    };
+  }
+  if (role === "admin") {
+    return {
+      background: "rgba(30,16,78,0.08)",
+      color: "#1e104e",
+    };
+  }
+  return {
+    background: "rgba(3,105,161,0.08)",
+    color: "#0369a1",
+  };
+}
 
 export function EventUsersPanel({ eventId }: Props) {
   const [users, setUsers] = useState<EventUser[]>([]);
@@ -122,6 +151,7 @@ export function EventUsersPanel({ eventId }: Props) {
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState<NewUserRole>("user");
 
   async function load() {
     setLoading(true);
@@ -190,7 +220,7 @@ export function EventUsersPanel({ eventId }: Props) {
     const res = await fetch(`/api/events/${eventId}/users`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, username, password }),
+      body: JSON.stringify({ name, username, password, role: newUserRole }),
     });
     setSaving(false);
     if (!res.ok) {
@@ -201,6 +231,7 @@ export function EventUsersPanel({ eventId }: Props) {
     setName("");
     setUsername("");
     setPassword("");
+    setNewUserRole("user");
     load();
   }
 
@@ -247,7 +278,7 @@ export function EventUsersPanel({ eventId }: Props) {
             Add User to Event
           </h3>
           <p className="mt-0.5 text-xs text-gray-500">
-            Assign an existing cashier or create a new one for this event.
+            Assign an existing user or create a new one for this event.
           </p>
         </div>
 
@@ -287,26 +318,26 @@ export function EventUsersPanel({ eventId }: Props) {
             /* Assign existing user */
             <form onSubmit={assignExistingUser}>
               <p className="mb-4 rounded-lg bg-blue-50 px-3 py-2.5 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-                <strong>Tip:</strong> Use this when a cashier already works at
-                another event. One account, multiple events — no duplicate
-                passwords to manage.
+                <strong>Tip:</strong> Use this when a user already works at
+                another event — cashiers and price-checkers alike. One
+                account, multiple events.
               </p>
 
               {availableUsers.length === 0 ? (
                 <p className="text-sm text-gray-400">
-                  All existing cashiers are already assigned to this event.
+                  All existing users are already assigned to this event.
                 </p>
               ) : (
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <Select
                     value={existingUserId}
                     onChange={setExistingUserId}
-                    placeholder="Choose a cashier…"
+                    placeholder="Choose a user…"
                     className="flex-1"
                   >
                     {availableUsers.map((user) => (
                       <option key={user.id} value={user.id}>
-                        {user.name} — {user.username}
+                        {user.name} — {user.username} ({roleLabel(user.role)})
                       </option>
                     ))}
                   </Select>
@@ -330,10 +361,47 @@ export function EventUsersPanel({ eventId }: Props) {
             /* Create new user */
             <form onSubmit={createUser}>
               <p className="mb-4 rounded-lg bg-orange-50 px-3 py-2.5 text-xs text-orange-700 dark:bg-orange-950 dark:text-orange-300">
-                <strong>Tip:</strong> Only use this for a brand-new cashier.
-                If they already have an account from another event, use
-                "Assign existing" instead.
+                <strong>Tip:</strong> Only use this for a brand-new account.
+                If they already have one from another event, use "Assign
+                existing" instead.
               </p>
+
+              <div className="mb-4">
+                <label className="mb-1.5 block text-xs font-medium text-gray-600 dark:text-gray-400">
+                  Role
+                </label>
+                <div className="grid grid-cols-2 gap-2 max-w-sm">
+                  <button
+                    type="button"
+                    onClick={() => setNewUserRole("user")}
+                    className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-all ${
+                      newUserRole === "user"
+                        ? "border-orange-400 bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
+                        : "border-gray-200 text-gray-500 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800"
+                    }`}
+                  >
+                    <User size={14} />
+                    Cashier
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewUserRole("price_checker")}
+                    className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-all ${
+                      newUserRole === "price_checker"
+                        ? "border-purple-400 bg-purple-50 text-purple-700 dark:bg-purple-950 dark:text-purple-300"
+                        : "border-gray-200 text-gray-500 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800"
+                    }`}
+                  >
+                    <ScanLine size={14} />
+                    Price Checker
+                  </button>
+                </div>
+                <p className="mt-1.5 text-xs text-gray-400">
+                  {newUserRole === "price_checker"
+                    ? "Can only access the Price Check scanner for this event — no POS, no admin pages."
+                    : "Full POS access for this event."}
+                </p>
+              </div>
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                 <div>
@@ -431,7 +499,7 @@ export function EventUsersPanel({ eventId }: Props) {
               No users assigned yet
             </p>
             <p className="mt-1 text-xs text-gray-400">
-              Use the form above to add cashiers to this event.
+              Use the form above to add users to this event.
             </p>
           </div>
         ) : (
@@ -450,9 +518,17 @@ export function EventUsersPanel({ eventId }: Props) {
 
                   {/* Identity */}
                   <div className="flex-1 min-w-0">
-                    <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-                      {user.name}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+                        {user.name}
+                      </p>
+                      <span
+                        className="flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold"
+                        style={roleBadgeStyle(user.role)}
+                      >
+                        {roleLabel(user.role)}
+                      </span>
+                    </div>
                     <p className="font-mono text-xs text-gray-400">
                       {user.username}
                     </p>

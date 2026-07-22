@@ -814,92 +814,81 @@ export function StockTab({
         )}
 
         {/* Import / export toolbar */}
-        <div className="flex flex-wrap items-center gap-2">
-          <p
-            className="text-sm flex-1"
-            style={{ color: "var(--muted-foreground)" }}
-          >
-            Use the table below, scan an item, or import from Excel.
+         <input
+          ref={fileInRef}
+          type="file"
+          accept=".xlsx"
+          className="hidden"
+          onChange={(e) => handleImport(e, "in")}
+        />
+
+        <input
+          ref={fileOutRef}
+          type="file"
+          accept=".xlsx"
+          className="hidden"
+          onChange={(e) => handleImport(e, "out")}
+        />
+
+        {activeType === "transfer_in" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm flex-1" style={{ color: "var(--muted-foreground)" }}>
+              Use the table below, scan an item, or import from Excel.
+            </p>
+
+            <button
+              onClick={() => fileInRef.current?.click()}
+              disabled={importingIn}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-50"
+              style={{ background: "#16a34a" }}
+            >
+              {importingIn ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+              Import Transfer In
+            </button>
+
+            <a
+              href={`/api/events/${eventId}/stock/export`}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border transition-all"
+              style={{ borderColor: "#16a34a", background: "rgba(22,163,74,0.08)", color: "#16a34a" }}
+            >
+              <Download size={13} />
+              Download In Template
+            </a>
+          </div>
+        )}
+
+        {activeType === "transfer_out" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm flex-1" style={{ color: "var(--muted-foreground)" }}>
+              Use the table below, scan an item, or import from Excel.
+            </p>
+
+            <button
+              onClick={() => fileOutRef.current?.click()}
+              disabled={importingOut}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-50"
+              style={{ background: "#dc2626" }}
+            >
+              {importingOut ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+              Import Transfer Out
+            </button>
+
+            <a
+              href={`/api/events/${eventId}/stock/transfer-out/export`}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border transition-all"
+              style={{ borderColor: "#dc2626", background: "rgba(220,38,38,0.08)", color: "#dc2626" }}
+            >
+              <Download size={13} />
+              Download Out Template
+            </a>
+          </div>
+        )}
+
+        {activeType === "adjustment" && (
+          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+            Use the table below or scan an item to record an adjustment.
           </p>
-
-          <input
-            ref={fileInRef}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={(e) => handleImport(e, "in")}
-          />
-
-          <input
-            ref={fileOutRef}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={(e) => handleImport(e, "out")}
-          />
-
-          <button
-            onClick={() => fileInRef.current?.click()}
-            disabled={importingIn}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition-all disabled:opacity-50"
-            style={{
-              borderColor: "var(--border)",
-              background: "var(--secondary)",
-              color: "#16a34a",
-            }}
-          >
-            {importingIn ? (
-              <RefreshCw size={13} className="animate-spin" />
-            ) : (
-              <Upload size={13} />
-            )}
-            Import In
-          </button>
-
-          <a
-            href={`/api/events/${eventId}/stock/export`}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition-all"
-            style={{
-              borderColor: "var(--border)",
-              background: "var(--secondary)",
-              color: "#16a34a",
-            }}
-          >
-            <Download size={13} />
-            In Template
-          </a>
-
-          <button
-            onClick={() => fileOutRef.current?.click()}
-            disabled={importingOut}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition-all disabled:opacity-50"
-            style={{
-              borderColor: "var(--border)",
-              background: "var(--secondary)",
-              color: "#dc2626",
-            }}
-          >
-            {importingOut ? (
-              <RefreshCw size={13} className="animate-spin" />
-            ) : (
-              <Upload size={13} />
-            )}
-            Import Out
-          </button>
-
-          <a
-            href={`/api/events/${eventId}/stock/transfer-out/export`}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border transition-all"
-            style={{
-              borderColor: "var(--border)",
-              background: "var(--secondary)",
-              color: "#dc2626",
-            }}
-          >
-            <Download size={13} />
-            Out Template
-          </a>
-        </div>
+        )}
 
         {importMsg && (
           <div
