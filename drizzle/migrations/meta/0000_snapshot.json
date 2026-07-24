@@ -1,5 +1,5 @@
 {
-  "id": "22e52a22-284b-49b6-881f-593c3dd068ba",
+  "id": "b0d56a10-baab-4c08-b8e4-17264b2da515",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -808,6 +808,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "company": {
+          "name": "company",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "verifier_code": {
           "name": "verifier_code",

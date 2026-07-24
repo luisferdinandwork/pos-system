@@ -1,18 +1,32 @@
 // lib/db/index.ts
-import { Pool, neonConfig } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-serverless";
-import ws from "ws";
+import { Pool, type PoolConfig } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "./schema";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not set");
 }
 
-// Required so Neon serverless Pool can use WebSockets in Node.js.
-neonConfig.webSocketConstructor = ws;
+const sslEnabled = process.env.DATABASE_SSL === "true";
 
-const pool = new Pool({
+const poolConfig: PoolConfig = {
   connectionString: process.env.DATABASE_URL,
+  application_name: "pos-system",
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+  ssl: sslEnabled
+    ? {
+        rejectUnauthorized:
+          process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+      }
+    : undefined,
+};
+
+const pool = new Pool(poolConfig);
+
+pool.on("error", (error) => {
+  console.error("Unexpected PostgreSQL pool error:", error);
 });
 
 export const db = drizzle(pool, { schema });

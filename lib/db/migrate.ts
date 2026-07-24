@@ -1,22 +1,26 @@
-// lib/db/migrate.ts
-import { neon } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-http";
-import { migrate } from "drizzle-orm/neon-http/migrator";
-import * as dotenv from "dotenv";
-
-dotenv.config({ path: ".env.local" });
-
-const sql = neon(process.env.DATABASE_URL!);
-const db = drizzle(sql);
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import {
+  closeScriptDatabase,
+  db,
+  getDatabaseTarget,
+} from "../../scripts/_db";
 
 async function main() {
-  console.log("⏳ Running migrations...");
-  await migrate(db, { migrationsFolder: "./drizzle/migrations" });
-  console.log("✅ Migrations complete.");
-  process.exit(0);
+  const target = getDatabaseTarget();
+  console.log(`⏳ Running PostgreSQL migrations on ${target.display}...`);
+
+  await migrate(db, {
+    migrationsFolder: "./drizzle/migrations",
+  });
+
+  console.log("✅ PostgreSQL migrations complete.");
 }
 
-main().catch((err) => {
-  console.error("❌ Migration failed:", err);
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    console.error(
+      `❌ Migration failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    process.exitCode = 1;
+  })
+  .finally(closeScriptDatabase);

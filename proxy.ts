@@ -82,7 +82,7 @@ function handlePriceCheckRoutes(
 }
 
 export default withAuth(
-  function middleware(req) {
+  function proxy(req) {
     const token = req.nextauth.token;
     const { pathname, searchParams } = req.nextUrl;
 
@@ -92,8 +92,8 @@ export default withAuth(
 
     const role = String(token.role);
     const assignedEventIds = normalizeEventIds(
-      (token as any).eventIds,
-      (token as any).eventId
+      token.eventIds,
+      token.eventId
     );
     const canAccessEvent = (eventId: number | null) =>
       Boolean(eventId && assignedEventIds.includes(Number(eventId)));

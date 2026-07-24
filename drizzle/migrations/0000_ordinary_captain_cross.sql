@@ -96,6 +96,7 @@ CREATE TABLE "event_receipt_templates" (
 CREATE TABLE "events" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"code" text NOT NULL,
+	"company" text,
 	"verifier_code" text NOT NULL,
 	"name" text NOT NULL,
 	"location" text,
