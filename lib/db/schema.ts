@@ -1,0 +1,375 @@
+// lib/db/schema.ts
+import {
+  pgTable,
+  serial,
+  text,
+  integer,
+  numeric,
+  timestamp,
+  boolean,
+  uniqueIndex,
+  index,
+} from "drizzle-orm/pg-core";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
+
+// ── Events ────────────────────────────────────────────────────────────────────
+export const events = pgTable(
+  "events",
+  {
+    id: serial("id").primaryKey(),
+    code: text("code").notNull(),
+    company: text("company"),
+    verifierCode: text("verifier_code").notNull(),
+
+    name: text("name").notNull(),
+    location: text("location"),
+    description: text("description"),
+    status: text("status").notNull().default("draft"),
+    startDate: timestamp("start_date"),
+    endDate: timestamp("end_date"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    codeUnique: uniqueIndex("events_code_unique").on(table.code),
+    verifierCodeUnique: uniqueIndex("events_verifier_code_unique").on(
+      table.verifierCode
+    ),
+    statusIdx: index("events_status_idx").on(table.status),
+  })
+);
+
+// ── Event Items ───────────────────────────────────────────────────────────────
+export const eventItems = pgTable("event_items", {
+  id:          serial("id").primaryKey(),
+  eventId:     integer("event_id").notNull()
+    .references(() => events.id, { onDelete: "cascade" }),
+  itemId:      text("item_id").notNull(),
+  baseItemNo:  text("base_item_no"),
+  name:        text("name").notNull(),
+  color:       text("color"),
+  variantCode: text("variant_code"),
+  unit:        text("unit").default("PCS"),
+  retailPrice: numeric("retail_price", { precision: 12, scale: 2 }).notNull(),
+  netPrice:    numeric("net_price",    { precision: 12, scale: 2 }).notNull(),
+  stock:       integer("stock").notNull().default(0),
+  createdAt:   timestamp("created_at").defaultNow(),
+});
+
+// ── Promos ────────────────────────────────────────────────────────────────────
+export const promos = pgTable("promos", {
+  id:                serial("id").primaryKey(),
+  eventId:           integer("event_id").notNull()
+    .references(() => events.id, { onDelete: "cascade" }),
+  name:              text("name").notNull(),
+  type:              text("type").notNull(),
+  isActive:          boolean("is_active").notNull().default(true),
+  applyToAll:        boolean("apply_to_all").notNull().default(false),
+  discountPct:       numeric("discount_pct",    { precision: 5,  scale: 2 }),
+  discountFix:       numeric("discount_fix",    { precision: 12, scale: 2 }),
+  fixedPrice:        numeric("fixed_price",     { precision: 12, scale: 2 }),
+  buyQty:            integer("buy_qty"),
+  getFreeQty:        integer("get_free_qty"),
+  freeItemId:        integer("free_item_id")
+    .references(() => eventItems.id, { onDelete: "set null" }),
+  spendMinAmount:    numeric("spend_min_amount", { precision: 12, scale: 2 }),
+  freeItemProductId: integer("free_item_product_id")
+    .references(() => eventItems.id, { onDelete: "set null" }),
+  bundlePrice:       numeric("bundle_price",    { precision: 12, scale: 2 }),
+  flashStartTime:    timestamp("flash_start_time"),
+  flashEndTime:      timestamp("flash_end_time"),
+  minPurchaseQty:    integer("min_purchase_qty").default(1),
+  minPurchaseAmt:    numeric("min_purchase_amt", { precision: 12, scale: 2 }),
+  maxUsageCount:     integer("max_usage_count"),
+  usageCount:        integer("usage_count").notNull().default(0),
+  createdAt:         timestamp("created_at").defaultNow(),
+});
+
+// ── Promo Tiers ───────────────────────────────────────────────────────────────
+export const promoTiers = pgTable("promo_tiers", {
+  id:          serial("id").primaryKey(),
+  promoId:     integer("promo_id").notNull()
+    .references(() => promos.id, { onDelete: "cascade" }),
+  minQty:      integer("min_qty").notNull(),
+  discountPct: numeric("discount_pct", { precision: 5,  scale: 2 }),
+  discountFix: numeric("discount_fix", { precision: 12, scale: 2 }),
+  fixedPrice:  numeric("fixed_price",  { precision: 12, scale: 2 }),
+});
+
+// ── Promo Items ───────────────────────────────────────────────────────────────
+export const promoItems = pgTable("promo_items", {
+  id:          serial("id").primaryKey(),
+  promoId:     integer("promo_id").notNull()
+    .references(() => promos.id, { onDelete: "cascade" }),
+  eventItemId: integer("event_item_id").notNull()
+    .references(() => eventItems.id, { onDelete: "cascade" }),
+});
+
+// ── Stock Transaction Types ───────────────────────────────────────────────────
+export const stockTransactionTypes = pgTable(
+  "stock_transaction_types",
+  {
+    id:               serial("id").primaryKey(),
+    code:             text("code").notNull(),
+    name:             text("name").notNull(),
+    defaultDirection: integer("default_direction").notNull().default(0),
+    isSystem:         boolean("is_system").notNull().default(true),
+    createdAt:        timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    codeUnique: uniqueIndex("stock_transaction_types_code_unique").on(table.code),
+  })
+);
+
+// ── Stock Transactions ────────────────────────────────────────────────────────
+export const stockTransactions = pgTable(
+  "stock_transactions",
+  {
+    id:            serial("id").primaryKey(),
+    eventItemId:   integer("event_item_id").notNull()
+      .references(() => eventItems.id, { onDelete: "cascade" }),
+    typeId:        integer("type_id").notNull()
+      .references(() => stockTransactionTypes.id, { onDelete: "restrict" }),
+    quantity:      integer("quantity").notNull(),
+    stockBefore:   integer("stock_before").notNull(),
+    stockAfter:    integer("stock_after").notNull(),
+    transactionId: integer("transaction_id").references(() => transactions.id, { onDelete: "set null" }),
+    referenceType: text("reference_type"),
+    referenceId:   text("reference_id"),
+    note:          text("note"),
+    createdAt:     timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    eventItemIdx:   index("stock_transactions_event_item_idx").on(table.eventItemId),
+    typeIdx:        index("stock_transactions_type_idx").on(table.typeId),
+    transactionIdx: index("stock_transactions_transaction_idx").on(table.transactionId),
+  })
+);
+
+// ── EDC Machines ──────────────────────────────────────────────────────────────
+export const edcMachines = pgTable("edc_machines", {
+  id:         serial("id").primaryKey(),
+  bankName:   text("bank_name").notNull(),
+  terminalId: text("terminal_id"),
+  label:      text("label").notNull(),
+  isActive:   boolean("is_active").notNull().default(true),
+  sortOrder:  integer("sort_order").notNull().default(0),
+  createdAt:  timestamp("created_at").defaultNow(),
+});
+
+// ── Payment Methods ───────────────────────────────────────────────────────────
+export const paymentMethods = pgTable("payment_methods", {
+  id:          serial("id").primaryKey(),
+  name:        text("name").notNull(),
+  type:        text("type").notNull(),
+  edcMethod:   text("edc_method"),
+  edcMachineId: integer("edc_machine_id")
+    .references(() => edcMachines.id, { onDelete: "set null" }),
+  provider:    text("provider"),
+  accountInfo: text("account_info"),
+  isActive:    boolean("is_active").notNull().default(true),
+  sortOrder:   integer("sort_order").notNull().default(0),
+  createdAt:   timestamp("created_at").defaultNow(),
+});
+
+// ── Cashier Sessions ──────────────────────────────────────────────────────────
+export const cashierSessions = pgTable("cashier_sessions", {
+  id:             serial("id").primaryKey(),
+  eventId:        integer("event_id").notNull()
+    .references(() => events.id, { onDelete: "cascade" }),
+  cashierName:    text("cashier_name").notNull(),
+  openingCash:    numeric("opening_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+  closingCash:    numeric("closing_cash", { precision: 12, scale: 2 }),
+  openedAt:       timestamp("opened_at").defaultNow(),
+  closedAt:       timestamp("closed_at"),
+  notes:          text("notes"),
+  createdAt:      timestamp("created_at").defaultNow(),
+});
+
+// ── Cash Drawer Counts ───────────────────────────────────────────────────────
+export const cashDrawerCounts = pgTable(
+  "cash_drawer_counts",
+  {
+    id:               serial("id").primaryKey(),
+    eventId:          integer("event_id").notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    cashierSessionId: integer("cashier_session_id")
+      .references(() => cashierSessions.id, { onDelete: "set null" }),
+    countedBy:        text("counted_by"),
+    expectedCash:     numeric("expected_cash", { precision: 12, scale: 2 }).notNull().default("0"),
+    actualCash:       numeric("actual_cash",   { precision: 12, scale: 2 }).notNull().default("0"),
+    difference:       numeric("difference",    { precision: 12, scale: 2 }).notNull().default("0"),
+    reason:           text("reason").notNull().default("count"),
+    notes:            text("notes"),
+    countedAt:        timestamp("counted_at").defaultNow(),
+    createdAt:        timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    eventIdx:   index("cash_drawer_counts_event_idx").on(table.eventId),
+    sessionIdx: index("cash_drawer_counts_session_idx").on(table.cashierSessionId),
+  })
+);
+
+// ── Event Receipt Templates ──────────────────────────────────────────────────
+export const eventReceiptTemplates = pgTable(
+  "event_receipt_templates",
+  {
+    id:              serial("id").primaryKey(),
+    eventId:         integer("event_id").notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    isActive:        boolean("is_active").notNull().default(true),
+
+    storeName:       text("store_name"),
+    headline:        text("headline"),
+    address:         text("address"),
+    phone:           text("phone"),
+    instagram:       text("instagram"),
+    taxId:           text("tax_id"),
+    logoUrl:         text("logo_url"),
+
+    footerText:      text("footer_text"),
+    returnPolicy:    text("return_policy"),
+    promoMessage:    text("promo_message"),
+
+    showEventName:        boolean("show_event_name").notNull().default(true),
+    showCashierName:      boolean("show_cashier_name").notNull().default(true),
+    showItemSku:          boolean("show_item_sku").notNull().default(true),
+    showPaymentReference: boolean("show_payment_reference").notNull().default(true),
+    showDiscountBreakdown:boolean("show_discount_breakdown").notNull().default(true),
+
+    customCss:       text("custom_css"),
+
+    createdAt:       timestamp("created_at").defaultNow(),
+    updatedAt:       timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    eventUnique: uniqueIndex("event_receipt_templates_event_unique").on(table.eventId),
+    eventIdx:    index("event_receipt_templates_event_idx").on(table.eventId),
+  })
+);
+
+// ── Transactions ──────────────────────────────────────────────────────────────
+export const transactions = pgTable(
+  "transactions",
+  {
+    id:        serial("id").primaryKey(),
+
+    // Official transaction number shown to users/receipts/reports.
+    // Format: LLLNNNNN-YYYYMM-SSSSS where LLLNNNNN is events.code.
+    // Example: JSE00001-202607-00001.
+    displayId: text("display_id").notNull(),
+
+    eventId:   integer("event_id").notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+
+    clientTxnId: text("client_txn_id").unique(),
+
+    cashierSessionId: integer("cashier_session_id")
+      .references(() => cashierSessions.id, { onDelete: "set null" }),
+    cashierName: text("cashier_name"),
+
+    totalAmount:  numeric("total_amount",  { precision: 12, scale: 2 }).notNull(),
+    discount:     numeric("discount",      { precision: 12, scale: 2 }).notNull().default("0"),
+    finalAmount:  numeric("final_amount",  { precision: 12, scale: 2 }).notNull(),
+    cashTendered: numeric("cash_tendered", { precision: 12, scale: 2 }),
+    changeAmount: numeric("change_amount", { precision: 12, scale: 2 }),
+    paymentMethod:    text("payment_method"),
+    paymentReference: text("payment_reference"),
+
+    receiptPrintCount: integer("receipt_print_count").notNull().default(0),
+
+    // ── Void tracking ──────────────────────────────────────────────────────
+    // status: "completed" (normal sale) | "voided" (original, now reversed)
+    //         | "void_entry" (the negative reversing row itself)
+    status: text("status").notNull().default("completed"),
+    voidedAt: timestamp("voided_at"),
+    voidedBy: text("voided_by"),
+    voidReason: text("void_reason"),
+    // Set only on the reversing ("void_entry") row — points back to the
+    // original transaction it reverses.
+    voidOfTransactionId: integer("void_of_transaction_id")
+      .references((): AnyPgColumn => transactions.id, { onDelete: "set null" }),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    displayUnique: uniqueIndex("transactions_display_id_unique").on(table.displayId),
+    eventIdx:      index("transactions_event_idx").on(table.eventId),
+    createdAtIdx:  index("transactions_created_at_idx").on(table.createdAt),
+    voidOfIdx:     index("transactions_void_of_idx").on(table.voidOfTransactionId),
+  })
+);
+
+// ── Transaction Items ─────────────────────────────────────────────────────────
+export const transactionItems = pgTable("transaction_items", {
+  id:            serial("id").primaryKey(),
+  transactionId: integer("transaction_id").notNull()
+    .references(() => transactions.id, { onDelete: "cascade" }),
+  eventItemId:   integer("event_item_id").notNull()
+    .references(() => eventItems.id, { onDelete: "cascade" }),
+  productName:   text("product_name").notNull(),
+  itemId:        text("item_id").notNull(),
+  quantity:      integer("quantity").notNull(),
+  unitPrice:     numeric("unit_price",   { precision: 12, scale: 2 }).notNull(),
+  discountAmt:   numeric("discount_amt", { precision: 12, scale: 2 }).notNull().default("0"),
+  finalPrice:    numeric("final_price",  { precision: 12, scale: 2 }).notNull(),
+  subtotal:      numeric("subtotal",     { precision: 12, scale: 2 }).notNull(),
+  promoApplied:  text("promo_applied"),
+});
+
+// ── Receipt Print Logs ────────────────────────────────────────────────────────
+export const receiptPrintLogs = pgTable("receipt_print_logs", {
+  id:            serial("id").primaryKey(),
+  transactionId: integer("transaction_id").notNull()
+    .references(() => transactions.id, { onDelete: "cascade" }),
+  printType:     text("print_type").notNull().default("reprint"),
+  printedAt:     timestamp("printed_at").defaultNow(),
+  printedBy:     text("printed_by"),
+});
+
+// ── Payments ──────────────────────────────────────────────────────────────────
+export const payments = pgTable("payments", {
+  id:            serial("id").primaryKey(),
+  transactionId: integer("transaction_id").notNull()
+    .references(() => transactions.id, { onDelete: "cascade" }),
+  method:        text("method").notNull(),
+  reference:     text("reference"),
+  paidAt:        timestamp("paid_at").defaultNow(),
+});
+
+// ── Auth Users ────────────────────────────────────────────────────────────────
+export const authUsers = pgTable("auth_users", {
+  id:           serial("id").primaryKey(),
+  name:         text("name").notNull(),
+  username:     text("username").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role:         text("role").notNull().default("user"),
+  eventId:      integer("event_id").references(() => events.id, { onDelete: "set null" }),
+  isActive:     boolean("is_active").notNull().default(true),
+  createdAt:    timestamp("created_at").defaultNow(),
+});
+
+// ── Auth User Event Assignments ───────────────────────────────────────────────
+export const authUserEvents = pgTable(
+  "auth_user_events",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    userEventUnique: uniqueIndex("auth_user_events_user_event_unique").on(
+      table.userId,
+      table.eventId
+    ),
+    userIdx: index("auth_user_events_user_idx").on(table.userId),
+    eventIdx: index("auth_user_events_event_idx").on(table.eventId),
+  })
+);
