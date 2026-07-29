@@ -159,6 +159,39 @@ export async function prepareEventOffline(eventId: number) {
     throw new Error("Event not found.");
   }
 
+  // Any local sale that hasn't reached the cloud yet is still holding its
+  // stock reservation locally. Re-preparing this event (the manual "Refresh"
+  // button, or the auto re-pull that runs right after a sync) must not
+  // silently hand that reserved stock back by overwriting it with the fresh
+  // cloud value — otherwise a pending/failed sale's items look available
+  // again and can be oversold.
+  const reservedByItem = new Map<number, number>();
+  const reservedRows = localDb
+    .select({
+      eventItemId: localTransactionItems.eventItemId,
+      quantity: localTransactionItems.quantity,
+    })
+    .from(localTransactionItems)
+    .innerJoin(
+      localTransactions,
+      eq(localTransactionItems.clientTxnId, localTransactions.clientTxnId)
+    )
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        inArray(localTransactions.syncStatus, ["pending", "failed"]),
+        ne(localTransactions.status, "voided")
+      )
+    )
+    .all();
+
+  for (const row of reservedRows) {
+    reservedByItem.set(
+      row.eventItemId,
+      (reservedByItem.get(row.eventItemId) ?? 0) + Number(row.quantity ?? 0)
+    );
+  }
+
   localDb.transaction((tx) => {
     tx.delete(localPromos).where(eq(localPromos.eventId, eventId)).run();
     tx.delete(localEventItems).where(eq(localEventItems.eventId, eventId)).run();
@@ -198,20 +231,25 @@ export async function prepareEventOffline(eventId: number) {
     for (const chunk of chunkArray(items, SQLITE_INSERT_BATCH_SIZE)) {
       tx.insert(localEventItems)
         .values(
-          chunk.map((item) => ({
-            id: item.id,
-            eventId: item.eventId,
-            itemId: item.itemId,
-            baseItemNo: item.baseItemNo,
-            name: item.name,
-            color: item.color,
-            variantCode: item.variantCode,
-            unit: item.unit ?? "PCS",
-            netPrice: String(item.netPrice),
-            retailPrice: String(item.retailPrice),
-            stock: Number(item.stock ?? 0),
-            originalStock: Number(item.stock ?? 0),
-          }))
+          chunk.map((item) => {
+            const freshStock = Number(item.stock ?? 0);
+            const reserved = reservedByItem.get(item.id) ?? 0;
+
+            return {
+              id: item.id,
+              eventId: item.eventId,
+              itemId: item.itemId,
+              baseItemNo: item.baseItemNo,
+              name: item.name,
+              color: item.color,
+              variantCode: item.variantCode,
+              unit: item.unit ?? "PCS",
+              netPrice: String(item.netPrice),
+              retailPrice: String(item.retailPrice),
+              stock: freshStock - reserved,
+              originalStock: freshStock,
+            };
+          })
         )
         .run();
     }
@@ -584,6 +622,103 @@ export function closeLocalCashierSession(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cloud cashier session cache (offline fallback)
+// ─────────────────────────────────────────────────────────────────────────────
+// Cashier sessions are opened/closed on the cloud only (an admin action from
+// the event detail page) — this is NOT a local-session-creation mechanism.
+// It's a read-through mirror of the last cloud session seen, so reopening the
+// local POS while the cloud DB is unreachable doesn't drop an already-open
+// session's attribution. Rows here are always syncStatus "synced" so
+// syncLocalCashierSessionsToNeon() (which only pushes "pending" rows) never
+// touches them.
+
+export type CloudCashierSessionShape = {
+  id: number;
+  eventId: number;
+  cashierName: string;
+  openingCash: string | number;
+  closingCash?: string | number | null;
+  openedAt: string | Date | null;
+  closedAt?: string | Date | null;
+  notes?: string | null;
+};
+
+export function cacheCloudCashierSession(
+  eventId: number,
+  session: CloudCashierSessionShape
+) {
+  const existing = localDb
+    .select({ id: localCashierSessions.id })
+    .from(localCashierSessions)
+    .where(eq(localCashierSessions.serverSessionId, session.id))
+    .limit(1)
+    .get();
+
+  const values = {
+    serverSessionId: session.id,
+    eventId,
+    cashierName: session.cashierName,
+    openingCash: String(session.openingCash ?? 0),
+    closingCash:
+      session.closingCash != null ? String(session.closingCash) : null,
+    openedAt: session.openedAt ? String(session.openedAt) : nowIso(),
+    closedAt: session.closedAt ? String(session.closedAt) : null,
+    notes: session.notes ?? null,
+    syncStatus: "synced",
+  };
+
+  if (existing) {
+    localDb
+      .update(localCashierSessions)
+      .set(values)
+      .where(eq(localCashierSessions.id, existing.id))
+      .run();
+  } else {
+    localDb.insert(localCashierSessions).values(values).run();
+  }
+}
+
+export function getCachedCloudCashierSession(
+  eventId: number,
+  preferredCashierName?: string | null
+) {
+  const openCached = localDb
+    .select()
+    .from(localCashierSessions)
+    .where(
+      and(
+        eq(localCashierSessions.eventId, eventId),
+        eq(localCashierSessions.syncStatus, "synced"),
+        sql`${localCashierSessions.serverSessionId} IS NOT NULL`,
+        sql`${localCashierSessions.closedAt} IS NULL`
+      )
+    )
+    .orderBy(sql`${localCashierSessions.openedAt} desc`)
+    .all();
+
+  if (openCached.length === 0) return null;
+
+  const matched = preferredCashierName
+    ? openCached.find((row) => row.cashierName === preferredCashierName) ??
+      openCached[0]
+    : openCached[0];
+
+  // Shaped like the cloud cashierSessions row the client already expects —
+  // its `id` must be the cloud session id, since that's what gets written
+  // straight onto local_transactions.cashierSessionId at checkout time.
+  return {
+    id: matched.serverSessionId,
+    eventId: matched.eventId,
+    cashierName: matched.cashierName,
+    openingCash: matched.openingCash,
+    closingCash: matched.closingCash,
+    openedAt: matched.openedAt,
+    closedAt: matched.closedAt,
+    notes: matched.notes,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Cash drawer count helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -736,18 +871,37 @@ export async function incrementLocalReceiptPrintCount(clientTxnId: string) {
     | null = null;
 
   if (txn.serverTransactionId) {
-    const updated = await setReceiptPrintCountAtLeast(
-      Number(txn.serverTransactionId),
-      nextCount
-    );
+    // The local SQLite increment above already committed — a transaction
+    // that's synced but whose cloud round trip fails here (offline, cloud
+    // DB unreachable, etc.) must not lose that local increment. Without
+    // this try/catch the whole function throws, the API route 500s, and
+    // the client falls back to a separate localStorage counter that drifts
+    // from the real (correctly incremented) SQLite count.
+    try {
+      const updated = await setReceiptPrintCountAtLeast(
+        Number(txn.serverTransactionId),
+        nextCount
+      );
 
-    cloudSync = {
-      transactionId: updated.transactionId,
-      localPrintCount: nextCount,
-      cloudBefore: Number(updated.receiptPrintCount ?? 0),
-      inserted: 0,
-      cloudAfter: Number(updated.receiptPrintCount ?? 0),
-    };
+      cloudSync = {
+        transactionId: updated.transactionId,
+        localPrintCount: nextCount,
+        cloudBefore: Number(updated.receiptPrintCount ?? 0),
+        inserted: 0,
+        cloudAfter: Number(updated.receiptPrintCount ?? 0),
+      };
+    } catch (error) {
+      localDb
+        .insert(localSyncLogs)
+        .values({
+          eventId: txn.eventId,
+          message: `Failed to sync receipt print count for ${clientTxnId} to cloud: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`,
+          createdAt: nowIso(),
+        })
+        .run();
+    }
   }
 
   return {
@@ -956,18 +1110,11 @@ export async function syncLocalCashDrawerCountsToNeon(eventId: number) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function syncLocalTransactionsToNeon(eventId: number) {
+  // Kept for local-only sessions (none are created today — cashier sessions
+  // are opened/closed on the cloud only, see
+  // app/api/local/events/[id]/cashier-session/route.ts) so this stays a
+  // harmless no-op rather than something that needs removing later.
   const sessionSync = await syncLocalCashierSessionsToNeon(eventId);
-
-  const sessionRows = localDb
-    .select()
-    .from(localCashierSessions)
-    .where(eq(localCashierSessions.eventId, eventId))
-    .all();
-
-  const sessionMap = new Map<number, number>();
-  for (const s of sessionRows) {
-    if (s.serverSessionId) sessionMap.set(s.id, s.serverSessionId);
-  }
 
   const pending = await getUnsyncedLocalTransactions(eventId);
 
@@ -987,10 +1134,13 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
         throw new Error("Local transaction has no items.");
       }
 
-      const serverCashierSessionId =
-        txn.cashierSessionId != null
-          ? (sessionMap.get(txn.cashierSessionId) ?? null)
-          : null;
+      // cashierSessionId on a local transaction is already the cloud
+      // cashier_sessions.id (sessions are opened/closed on the cloud only),
+      // so it's passed straight through instead of remapping through local
+      // session ids — remapping through the local `local_cashier_sessions`
+      // table silently dropped this on every sync, since nothing writes to
+      // that table when sessions are cloud-managed.
+      const serverCashierSessionId = txn.cashierSessionId ?? null;
 
       const created = await createTransaction({
         clientTxnId:      txn.clientTxnId,
