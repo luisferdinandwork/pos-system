@@ -190,7 +190,7 @@ function QtyInput({ value, onChange }: { value: number; onChange: (qty: number) 
       onFocus={(e) => e.target.select()}
       onBlur={commit}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      className="w-10 text-center text-sm font-black bg-transparent focus:outline-none"
+      className="w-10 text-center text-lg font-black bg-transparent focus:outline-none"
       style={{ color: "var(--foreground)" }}
     />
   );
@@ -1783,7 +1783,7 @@ function POSInner() {
             <div className="flex items-center justify-between gap-3 mb-3">
               <div>
                 <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:C.mutedFg }}>Cart</p>
-                <p className="text-sm font-black" style={{ color:C.fg }}>{itemCount} item{itemCount===1?"":"s"}</p>
+                <p className="text-xl font-black" style={{ color:C.fg }}>{itemCount} item{itemCount===1?"":"s"}</p>
               </div>
               {cart.length>0&&(
                 <button onClick={()=>setCart([])} className="text-[10px] px-3 py-1.5 rounded-xl font-black transition-all hover:bg-red-100"
@@ -1886,10 +1886,9 @@ function POSInner() {
             )}
             <div className="rounded-2xl px-4 py-3 flex items-center justify-between" style={{ background:cart.length>0?C.deep:C.muted }}>
               <div>
-                <p className="text-[10px] font-black uppercase tracking-widest" style={{ color:cart.length>0?"rgba(255,255,255,0.5)":C.mutedFg }}>
-                  {itemCount} item{itemCount===1?"":"s"}
+                <p className="text-lg font-black uppercase tracking-widest" style={{ color:cart.length>0?C.orange:C.border }}>
+                  <span className="text-3xl">{itemCount} </span>item{itemCount===1?"":"s"}
                 </p>
-                <p className="text-xs mt-0.5 font-semibold" style={{ color:cart.length>0?"rgba(255,255,255,0.5)":C.mutedFg }}>Total</p>
               </div>
               <p className="text-3xl font-black" style={{ color:cart.length>0?C.orange:C.border }}>
                 {money(total)}
