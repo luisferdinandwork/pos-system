@@ -224,6 +224,12 @@ function POSInner() {
   const [online,           setOnline]           = useState(true);
   const [preparing,        setPreparing]        = useState(false);
   const [syncing,          setSyncing]          = useState(false);
+  // Ref (not state) so it's checked synchronously at call time regardless of
+  // which trigger fires (checkout auto-sync, the debounced pendingSyncCount
+  // effect, or the manual Sync button) — state alone let two syncs race,
+  // since a timer scheduled while `syncing` was still false doesn't get
+  // cancelled just because `syncing` flips true before it fires.
+  const syncingRef = useRef(false);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [localReady,       setLocalReady]       = useState(false);
   const [preparedEvents,   setPreparedEvents]   = useState<{ id:number;name:string;status:string;location:string|null;preparedAt:string;pendingSyncCount:number; }[]>([]);
@@ -415,6 +421,8 @@ function POSInner() {
       return;
     }
 
+    if (syncingRef.current) return;
+    syncingRef.current = true;
     setSyncing(true);
 
     try {
@@ -463,6 +471,7 @@ function POSInner() {
         true
       );
     } finally {
+      syncingRef.current = false;
       setSyncing(false);
     }
   }

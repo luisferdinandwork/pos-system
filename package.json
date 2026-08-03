@@ -16,6 +16,7 @@
     "auth:create-admin": "tsx scripts/create-admin.ts",
     "db:seed-all": "npm run auth:create-admin && npm run db:seed && npm run db:seed-payments",
     "db:reset": "tsx scripts/reset.ts",
+    "db:reset:local": "tsx scripts/reset-local-db.ts",
     "db:setup:production": "npm run db:migrate && npm run db:seed:production",
     "db:rebuild:production": "npm run db:reset && npm run db:setup:production"
   },

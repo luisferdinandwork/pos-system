@@ -15,6 +15,10 @@ import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { cashierSessions } from "@/lib/db/schema";
 import { and, eq, isNull, desc } from "drizzle-orm";
+import {
+  cacheCloudCashierSession,
+  getCachedCloudCashierSession,
+} from "@/lib/local-pos";
 
 export async function GET(
   _req: NextRequest,
@@ -29,27 +33,42 @@ export async function GET(
   const authSession = await getServerSession(authOptions);
   const userName    = authSession?.user?.name ?? null;
 
-  // All open sessions for this event
-  const openSessions = await db
-    .select()
-    .from(cashierSessions)
-    .where(
-      and(
-        eq(cashierSessions.eventId, eventId),
-        isNull(cashierSessions.closedAt)
+  // The cloud DB (Neon) may be unreachable while the local POS itself is up
+  // and running offline. Without a fallback, every reload while offline
+  // silently drops the cashier's already-open session and sales fall back
+  // to "anonymous" — fall back to the last session we successfully saw for
+  // this event instead of failing outright.
+  try {
+    // All open sessions for this event
+    const openSessions = await db
+      .select()
+      .from(cashierSessions)
+      .where(
+        and(
+          eq(cashierSessions.eventId, eventId),
+          isNull(cashierSessions.closedAt)
+        )
       )
-    )
-    .orderBy(desc(cashierSessions.openedAt));
+      .orderBy(desc(cashierSessions.openedAt));
 
-  if (openSessions.length === 0)
-    return NextResponse.json(null, { status: 404 });
+    if (openSessions.length === 0)
+      return NextResponse.json(null, { status: 404 });
 
-  // Prefer the session whose cashierName matches the logged-in user
-  const matched = userName
-    ? openSessions.find(s => s.cashierName === userName) ?? openSessions[0]
-    : openSessions[0];
+    // Prefer the session whose cashierName matches the logged-in user
+    const matched = userName
+      ? openSessions.find(s => s.cashierName === userName) ?? openSessions[0]
+      : openSessions[0];
 
-  return NextResponse.json(matched);
+    cacheCloudCashierSession(eventId, matched);
+
+    return NextResponse.json(matched);
+  } catch (error) {
+    console.error("[LocalCashierSessionRoute] Cloud lookup failed, falling back to cache:", error);
+
+    const cached = getCachedCloudCashierSession(eventId, userName);
+
+    return NextResponse.json(cached, { status: cached ? 200 : 404 });
+  }
 }
 
 export async function PUT(
