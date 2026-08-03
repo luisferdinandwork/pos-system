@@ -27,13 +27,16 @@ export async function POST(
     const receiptPrintCountSync =
       await syncLocalReceiptPrintCountsToNeon(eventId);
 
+    const hasFailures =
+      transactionSync.failed > 0 || transactionSync.voidSync.failed > 0;
+
     return NextResponse.json(
       {
         ...transactionSync,
         receiptPrintCountSync,
       },
       {
-        status: transactionSync.failed > 0 ? 207 : 200,
+        status: hasFailures ? 207 : 200,
       }
     );
   } catch (error) {

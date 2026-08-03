@@ -1,5 +1,5 @@
 // lib/local-pos.ts
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import { localDb } from "@/lib/local-db";
 import {
   localEvents,
@@ -539,6 +539,8 @@ export async function voidLocalTransaction(
   });
 
   if (!original.serverTransactionId) {
+    // Never synced as a sale, so there is nothing to reconcile in the cloud —
+    // voidSyncStatus stays null (not "needs retry").
     return { clientTxnId, voidedAt: now, cloudVoided: false };
   }
 
@@ -548,9 +550,24 @@ export async function voidLocalTransaction(
       voidReason: options.voidReason ?? null,
     });
 
+    localDb
+      .update(localTransactions)
+      .set({ voidSyncStatus: "synced", voidSyncError: null } as any)
+      .where(eq(localTransactions.clientTxnId, clientTxnId))
+      .run();
+
     return { clientTxnId, voidedAt: now, cloudVoided: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to void on cloud.";
+
+    // Marked "failed" (not left null) so syncLocalVoidsToNeon() picks this up
+    // and retries automatically on the next sync — this used to have no
+    // retry path at all, so an offline void just stayed unsynced forever.
+    localDb
+      .update(localTransactions)
+      .set({ voidSyncStatus: "failed", voidSyncError: message } as any)
+      .where(eq(localTransactions.clientTxnId, clientTxnId))
+      .run();
 
     localDb
       .insert(localSyncLogs)
@@ -563,6 +580,94 @@ export async function voidLocalTransaction(
 
     return { clientTxnId, voidedAt: now, cloudVoided: false, cloudError: message };
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retry cloud voids that failed to sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function syncLocalVoidsToNeon(eventId: number) {
+  const pending = localDb
+    .select()
+    .from(localTransactions)
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        eq(localTransactions.status, "voided"),
+        eq(localTransactions.voidSyncStatus, "failed"),
+        sql`${localTransactions.serverTransactionId} IS NOT NULL`
+      )
+    )
+    .all();
+
+  const results: { clientTxnId: string; ok: boolean; error?: string }[] = [];
+
+  for (const txn of pending) {
+    try {
+      await voidTransaction(Number(txn.serverTransactionId), {
+        voidedBy: (txn as any).voidedBy ?? null,
+        voidReason: (txn as any).voidReason ?? null,
+      });
+
+      localDb
+        .update(localTransactions)
+        .set({ voidSyncStatus: "synced", voidSyncError: null } as any)
+        .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
+        .run();
+
+      localDb
+        .insert(localSyncLogs)
+        .values({
+          eventId,
+          message: `Synced void for local transaction ${txn.clientTxnId} to cloud`,
+          createdAt: nowIso(),
+        })
+        .run();
+
+      results.push({ clientTxnId: txn.clientTxnId, ok: true });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to void on cloud.";
+
+      // A prior attempt may have actually reached the cloud even though the
+      // response never made it back here (dropped connection mid-request) —
+      // voidTransaction() then throws "already been voided" on retry. Treat
+      // that as reconciled instead of retrying forever.
+      const alreadyVoided = message.toLowerCase().includes("already been voided");
+
+      localDb
+        .update(localTransactions)
+        .set({
+          voidSyncStatus: alreadyVoided ? "synced" : "failed",
+          voidSyncError: alreadyVoided ? null : message,
+        } as any)
+        .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
+        .run();
+
+      localDb
+        .insert(localSyncLogs)
+        .values({
+          eventId,
+          message: alreadyVoided
+            ? `Void for ${txn.clientTxnId} already existed on cloud — marked synced`
+            : `Failed to sync void for ${txn.clientTxnId}: ${message}`,
+          createdAt: nowIso(),
+        })
+        .run();
+
+      results.push({
+        clientTxnId: txn.clientTxnId,
+        ok: alreadyVoided,
+        error: alreadyVoided ? undefined : message,
+      });
+    }
+  }
+
+  return {
+    synced: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -698,10 +803,19 @@ export function getCachedCloudCashierSession(
 
   if (openCached.length === 0) return null;
 
+  // Same rule as the live cashier-session route: don't fall back to some
+  // other cached cashier's session when the preferred name doesn't match —
+  // that would silently attach this cashier's offline sales to someone
+  // else's shift.
   const matched = preferredCashierName
-    ? openCached.find((row) => row.cashierName === preferredCashierName) ??
-      openCached[0]
-    : openCached[0];
+    ? openCached.find(
+        (row) => row.cashierName.trim() === preferredCashierName.trim()
+      ) ?? null
+    : openCached.length === 1
+      ? openCached[0]
+      : null;
+
+  if (!matched) return null;
 
   // Shaped like the cloud cashierSessions row the client already expects —
   // its `id` must be the cloud session id, since that's what gets written
@@ -1235,16 +1349,18 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
     }
   }
 
+  const voidSync = await syncLocalVoidsToNeon(eventId);
   const drawerSync = await syncLocalCashDrawerCountsToNeon(eventId);
   const receiptPrintSync = await syncLocalReceiptPrintCountsToNeon(eventId);
 
   return {
-    success: results.every((result) => result.ok),
+    success: results.every((result) => result.ok) && voidSync.failed === 0,
     total:   results.length,
     synced:  results.filter((result) => result.ok).length,
     failed:  results.filter((result) => !result.ok).length,
     results,
     sessionSync,
+    voidSync,
     drawerSync,
     receiptPrintCountSync: {
       inserted: receiptPrintSync.inserted,
@@ -1331,7 +1447,13 @@ export function getLocalPendingSyncCount(eventId: number) {
     .where(
       and(
         eq(localTransactions.eventId, eventId),
-        inArray(localTransactions.syncStatus, ["pending", "failed"])
+        or(
+          inArray(localTransactions.syncStatus, ["pending", "failed"]),
+          and(
+            eq(localTransactions.status, "voided"),
+            eq(localTransactions.voidSyncStatus, "failed")
+          )
+        )
       )
     )
     .get();

@@ -188,7 +188,9 @@ export function initLocalDb() {
       status                TEXT NOT NULL DEFAULT 'completed',
       voided_at             TEXT,
       voided_by             TEXT,
-      void_reason           TEXT
+      void_reason           TEXT,
+      void_sync_status      TEXT,
+      void_sync_error       TEXT
     );
 
     CREATE TABLE IF NOT EXISTS local_transaction_items (
@@ -317,6 +319,18 @@ export function initLocalDb() {
     "local_transactions",
     "void_reason",
     `ALTER TABLE local_transactions ADD COLUMN void_reason TEXT`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "void_sync_status",
+    `ALTER TABLE local_transactions ADD COLUMN void_sync_status TEXT`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "void_sync_error",
+    `ALTER TABLE local_transactions ADD COLUMN void_sync_error TEXT`
   );
 
   addColumnIfMissing(

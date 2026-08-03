@@ -34,6 +34,8 @@ type LocalTxn = {
   voidedAt?: string | null;
   voidedBy?: string | null;
   voidReason?: string | null;
+  voidSyncStatus?: string | null;
+  voidSyncError?: string | null;
 };
 type TxnItem = {
   clientTxnId: string; eventItemId: number; itemId: string; baseItemNo?: string | null; productName: string;
@@ -292,7 +294,7 @@ function HistoryInner() {
   }
 
   return (
-    <div className="min-h-screen" style={{ background:C.bg }}>
+    <div className="h-full overflow-y-auto" style={{ background:C.bg }}>
 
       {/* ── Header ── */}
       <div style={{ background:C.deep }}>
@@ -519,6 +521,13 @@ function HistoryInner() {
                           {sync.icon}{sync.label}
                         </span>
                         {txn.syncError&&<p className="text-[9px] font-semibold truncate max-w-[80px]" style={{ color:"#dc2626" }}>Error</p>}
+                        {txn.voidSyncStatus==="failed"&&(
+                          <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-lg whitespace-nowrap"
+                            style={{ background:"rgba(220,38,38,0.08)", color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)" }}
+                            title={txn.voidSyncError??"Void hasn't synced to the cloud yet — will retry automatically."}>
+                            <AlertCircle size={10}/>Void unsynced
+                          </span>
+                        )}
                       </div>
 
                       {/* Print button */}
@@ -572,6 +581,13 @@ function HistoryInner() {
                             style={{ background:sync.bg, color:sync.color, border:`1px solid ${sync.border}` }}>
                             {sync.icon}{sync.label}
                           </span>
+                          {txn.voidSyncStatus==="failed"&&(
+                            <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-lg whitespace-nowrap"
+                              style={{ background:"rgba(220,38,38,0.08)", color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)" }}
+                              title={txn.voidSyncError??"Void hasn't synced to the cloud yet — will retry automatically."}>
+                              <AlertCircle size={10}/>Void unsynced
+                            </span>
+                          )}
                           {/* Action buttons grouped */}
                           <div className="flex items-center gap-1">
                             {!hasBeenVoided && (

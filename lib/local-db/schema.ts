@@ -102,6 +102,13 @@ export const localTransactions = sqliteTable("local_transactions", {
   voidedAt: text("voided_at"),
   voidedBy: text("voided_by"),
   voidReason: text("void_reason"),
+
+  // null = not voided (or voided but never synced as a sale, so nothing to
+  // reconcile in the cloud). "failed" = voided locally but the cloud void
+  // hasn't landed yet — picked up and retried by syncLocalVoidsToNeon().
+  // "synced" = cloud void confirmed.
+  voidSyncStatus: text("void_sync_status"),
+  voidSyncError: text("void_sync_error"),
 });
 
 export const localTransactionItems = sqliteTable("local_transaction_items", {

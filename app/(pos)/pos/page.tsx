@@ -412,7 +412,7 @@ function POSInner() {
     if (prepared) { setScreen("sell"); await refreshPendingCount(ev.id); }
   }
   async function refreshPendingCount(eventId: number) {
-    try { const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json()); setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed").length:0); } catch { setPendingSyncCount(0); }
+    try { const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json()); setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed"||(t.status==="voided"&&t.voidSyncStatus==="failed")).length:0); } catch { setPendingSyncCount(0); }
   }
 
   async function syncLocalTransactions(eventId: number) {
@@ -446,12 +446,27 @@ function POSInner() {
       // reflects for the sales that just synced.
       await prepareEventOffline(eventId, true);
 
+      const voidFailed = Number(result?.voidSync?.failed ?? 0);
+
       if (Number(result?.failed ?? 0) > 0) {
         const firstError = result?.results?.find((r: any) => !r.ok)?.error;
 
         flash(
           `${result.synced} synced, ${result.failed} failed${
             firstError ? `: ${firstError}` : "."
+          }`,
+          true
+        );
+
+        return;
+      }
+
+      if (voidFailed > 0) {
+        const firstVoidError = result?.voidSync?.results?.find((r: any) => !r.ok)?.error;
+
+        flash(
+          `${voidFailed} void${voidFailed > 1 ? "s" : ""} still not synced to cloud${
+            firstVoidError ? `: ${firstVoidError}` : "."
           }`,
           true
         );
@@ -669,6 +684,12 @@ function POSInner() {
     return ()=>{ window.removeEventListener("online",on); window.removeEventListener("offline",off); };
   },[]);
   useEffect(()=>{ if (!online||!event?.id||pendingSyncCount===0||syncing) return; const t=setTimeout(()=>syncLocalTransactions(event.id),1500); return ()=>clearTimeout(t); },[online,event?.id,pendingSyncCount]);
+  // Fallback poll: the effect above only re-fires when pendingSyncCount
+  // CHANGES, so a sync that fails (transient network blip, deadlock, etc.)
+  // and is followed by no new sales would otherwise sit unsynced until
+  // someone manually hits "Sync". Retry periodically as a safety net so
+  // failed items don't get stuck waiting on the next unrelated event.
+  useEffect(()=>{ if (!online||!event?.id||pendingSyncCount===0) return; const t=setInterval(()=>{ if (!syncingRef.current) syncLocalTransactions(event.id); },60_000); return ()=>clearInterval(t); },[online,event?.id,pendingSyncCount]);
   useEffect(()=>{
     if (!authSession?.user) return;
 

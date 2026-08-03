@@ -15,6 +15,13 @@ const poolConfig: PoolConfig = {
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
+  // Without these, a stalled query (flaky network to the cloud DB, a lock
+  // wait that never resolves) can hang a sync request indefinitely instead
+  // of failing — leaving the POS "syncing…" forever rather than marking the
+  // transaction failed so it gets retried. 30s is generous for even a large
+  // multi-item cart's stock-deduction loop.
+  statement_timeout: 30_000,
+  query_timeout: 30_000,
   ssl: sslEnabled
     ? {
         rejectUnauthorized:

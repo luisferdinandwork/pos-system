@@ -193,7 +193,15 @@ export async function createTransaction(payload: CheckoutPayload) {
       paidAt: now,
     });
 
-    for (const item of payload.items) {
+    // Lock rows in a consistent order (ascending eventItemId) across all
+    // callers. Without this, two concurrent checkouts/voids that share items
+    // but process their carts in different orders can each hold a lock the
+    // other needs — a classic Postgres deadlock (40P01) that aborts the
+    // whole transaction. The risk (and how often support saw sync fail)
+    // scales with cart size, since bigger carts hold more locks at once.
+    const orderedItems = [...payload.items].sort((a, b) => a.eventItemId - b.eventItemId);
+
+    for (const item of orderedItems) {
       await deductStock(item.eventItemId, item.quantity, txn.id, tx);
     }
 
@@ -318,7 +326,10 @@ export async function voidTransaction(
 
     const restockedItems: { eventItemId: number; quantity: number }[] = [];
 
-    for (const item of items) {
+    // Same consistent lock order as createTransaction() — see comment there.
+    const orderedItems = [...items].sort((a, b) => a.eventItemId - b.eventItemId);
+
+    for (const item of orderedItems) {
       await addStockTransaction(
         {
           eventItemId: item.eventItemId,

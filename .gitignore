@@ -43,3 +43,6 @@ next-env.d.ts
 
 # calude
 .claude/
+
+# local POS SQLite data — each machine keeps its own, never shared via git
+/data/
