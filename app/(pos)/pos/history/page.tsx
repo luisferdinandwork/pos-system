@@ -465,18 +465,13 @@ function HistoryInner() {
                 const printCount = printCounts[txn.clientTxnId]??0;
                 const isLast     = i===filtered.length-1;
 
-                /**
-                 * NOTE — asymmetry with the cloud Transactions tab:
-                 * Locally there is only ONE row per sale (voidLocalTransaction
-                 * just marks this row voided in place; it does not create a
-                 * separate reversing "entry" row the way the cloud side does).
-                 * So there is no second row to badge as "Void" here — applying
-                 * "stay completed, badge only the new entry" literally means
-                 * this local row shows NO void indication at all once voided.
-                 * hasBeenVoided is kept ONLY to hide the Void button so the
-                 * same sale can't be voided twice; it drives no visual styling.
-                 */
-                const hasBeenVoided = txn.status === "voided";
+                // voidLocalTransaction() now mirrors the cloud model: this row
+                // stays "completed" (a reversing entry is inserted separately,
+                // excluded from this list — see getLocalTransactionsByEvent),
+                // so voidedAt (stamped on the original regardless) is the
+                // signal that this sale has already been voided. Used only to
+                // hide the Void button so the same sale can't be voided twice.
+                const hasBeenVoided = txn.voidedAt != null;
 
                 return (
                   <div key={txn.clientTxnId} style={{ borderBottom:isLast?"none":`1px solid ${C.muted}` }}>

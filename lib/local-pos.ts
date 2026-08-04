@@ -1,5 +1,5 @@
 // lib/local-pos.ts
-import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, notInArray, or, sql } from "drizzle-orm";
 import { localDb } from "@/lib/local-db";
 import {
   localEvents,
@@ -165,6 +165,24 @@ export async function prepareEventOffline(eventId: number) {
   // silently hand that reserved stock back by overwriting it with the fresh
   // cloud value — otherwise a pending/failed sale's items look available
   // again and can be oversold.
+  // A sale that's been voided (a reversing row now exists for it) no longer
+  // holds a real stock reservation — voidLocalTransaction() already added its
+  // stock back directly. Excluding it here (instead of relying on a status
+  // flip that no longer happens on the original row) stops re-prepare from
+  // double-subtracting that stock and stranding a phantom reservation.
+  const voidedOriginalIds = localDb
+    .select({ voidOfClientTxnId: localTransactions.voidOfClientTxnId })
+    .from(localTransactions)
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        sql`${localTransactions.voidOfClientTxnId} IS NOT NULL`
+      )
+    )
+    .all()
+    .map((row) => row.voidOfClientTxnId)
+    .filter((id): id is string => Boolean(id));
+
   const reservedByItem = new Map<number, number>();
   const reservedRows = localDb
     .select({
@@ -180,7 +198,10 @@ export async function prepareEventOffline(eventId: number) {
       and(
         eq(localTransactions.eventId, eventId),
         inArray(localTransactions.syncStatus, ["pending", "failed"]),
-        ne(localTransactions.status, "voided")
+        sql`${localTransactions.voidOfClientTxnId} IS NULL`,
+        voidedOriginalIds.length > 0
+          ? notInArray(localTransactions.clientTxnId, voidedOriginalIds)
+          : sql`1=1`
       )
     )
     .all();
@@ -462,14 +483,27 @@ export async function createLocalTransaction(payload: LocalTransactionPayload) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Voids a local transaction. Always restocks local_event_items immediately
- * regardless of connectivity. If the transaction was already synced to Neon
- * (serverTransactionId is set), also voids it there — which is where the real
- * reversing ledger entry (transactions row + stock_transactions row) lives.
+ * Voids a local transaction the same way the cloud does it (see
+ * lib/transactions.ts::voidTransaction, which this mirrors on purpose):
+ * 1. The original row is NEVER mutated in place — it stays "completed" so
+ *    it keeps showing as a normal sale. Only voidedAt/voidedBy/voidReason
+ *    are stamped on it (audit trail + the "already voided" guard).
+ * 2. A new reversing row is inserted (status="void", voidOfClientTxnId
+ *    pointing back at the original) with negative amounts and negative
+ *    line-item quantities/subtotals, mirroring the original's items.
+ * 3. Stock is added back on local_event_items immediately, regardless of
+ *    connectivity.
  *
- * If the cloud void fails (e.g. offline), the local void still stands but
- * cloud data will be out of sync until this is retried — there is currently
- * no automatic retry queue for this, only for normal sale sync.
+ * Keeping this additive — instead of the old "flip status on the same row"
+ * model — is what makes the local POS export (buildLocalTransactionsExcel)
+ * match the full-event export shape, and makes local revenue/items-sold
+ * stats net out a void automatically via SUM() instead of staying wrong.
+ *
+ * If the original transaction was already synced to Neon (serverTransactionId
+ * is set), this also voids it there — which is where the real reversing
+ * ledger entry (transactions row + stock_transactions row) lives. If that
+ * cloud call fails (e.g. offline), voidSyncStatus is marked "failed" so
+ * syncLocalVoidsToNeon() retries it automatically on the next sync.
  */
 export async function voidLocalTransaction(
   clientTxnId: string,
@@ -486,7 +520,18 @@ export async function voidLocalTransaction(
     throw new Error(`Local transaction "${clientTxnId}" not found.`);
   }
 
-  if ((original as any).status === "voided") {
+  if ((original as any).voidOfClientTxnId != null) {
+    throw new Error("Cannot void a void entry.");
+  }
+
+  const existingVoidEntry = localDb
+    .select({ clientTxnId: localTransactions.clientTxnId })
+    .from(localTransactions)
+    .where(eq(localTransactions.voidOfClientTxnId, clientTxnId))
+    .limit(1)
+    .get();
+
+  if (existingVoidEntry) {
     throw new Error("Transaction is already voided.");
   }
 
@@ -497,17 +542,66 @@ export async function voidLocalTransaction(
     .all();
 
   const now = nowIso();
+  const voidClientTxnId = `VOID-${clientTxnId}`;
 
   localDb.transaction((tx) => {
     tx.update(localTransactions)
       .set({
-        status: "voided",
         voidedAt: now,
         voidedBy: options.voidedBy ?? null,
         voidReason: options.voidReason ?? null,
       } as any)
       .where(eq(localTransactions.clientTxnId, clientTxnId))
       .run();
+
+    tx.insert(localTransactions)
+      .values({
+        clientTxnId: voidClientTxnId,
+        displayId: `VOID-${original.displayId ?? clientTxnId}`,
+        eventId: original.eventId,
+        eventCode: original.eventCode,
+        cashierSessionId: original.cashierSessionId,
+        cashierName: options.voidedBy ?? original.cashierName,
+        totalAmount: String(-Number(original.totalAmount)),
+        discount: String(-Number(original.discount)),
+        finalAmount: String(-Number(original.finalAmount)),
+        cashTendered: null,
+        changeAmount: null,
+        paymentMethod: original.paymentMethod,
+        paymentReference: original.paymentReference,
+        createdAt: now,
+        // This row is a local-only bookkeeping mirror of the cloud reversal —
+        // it never gets pushed through createTransaction(), so it's never a
+        // sale that needs to sync. getUnsyncedLocalTransactions() also
+        // excludes it explicitly via voidOfClientTxnId.
+        syncStatus: "synced",
+        receiptPrintCount: 0,
+        status: "void",
+        voidedAt: now,
+        voidedBy: options.voidedBy ?? null,
+        voidReason: options.voidReason ?? null,
+        voidOfClientTxnId: clientTxnId,
+      } as any)
+      .run();
+
+    for (const chunk of chunkArray(items, SQLITE_INSERT_BATCH_SIZE)) {
+      tx.insert(localTransactionItems)
+        .values(
+          chunk.map((item) => ({
+            clientTxnId: voidClientTxnId,
+            eventItemId: item.eventItemId,
+            itemId: item.itemId,
+            productName: item.productName,
+            quantity: -item.quantity,
+            unitPrice: item.unitPrice,
+            discountAmt: item.discountAmt,
+            finalPrice: item.finalPrice,
+            subtotal: String(-Number(item.subtotal)),
+            promoApplied: item.promoApplied,
+          }))
+        )
+        .run();
+    }
 
     for (const item of items) {
       const localItem = tx
@@ -539,13 +633,17 @@ export async function voidLocalTransaction(
   });
 
   if (!original.serverTransactionId) {
-    // Never synced as a sale, so there is nothing to reconcile in the cloud —
-    // voidSyncStatus stays null (not "needs retry").
+    // Nothing in the cloud to void RIGHT NOW — voidSyncStatus stays null
+    // (not "needs retry") since there's no cloud void to retry yet. The sale
+    // itself is still queued to sync normally (getUnsyncedLocalTransactions
+    // no longer excludes voided originals), and once it lands, the "voided
+    // mid-sync" check in syncLocalTransactionsToNeon() picks up that it's
+    // already voided and immediately queues the matching cloud void.
     return { clientTxnId, voidedAt: now, cloudVoided: false };
   }
 
   try {
-    await voidTransaction(Number(original.serverTransactionId), {
+    const cloudResult = await voidTransaction(Number(original.serverTransactionId), {
       voidedBy: options.voidedBy ?? null,
       voidReason: options.voidReason ?? null,
     });
@@ -554,6 +652,14 @@ export async function voidLocalTransaction(
       .update(localTransactions)
       .set({ voidSyncStatus: "synced", voidSyncError: null } as any)
       .where(eq(localTransactions.clientTxnId, clientTxnId))
+      .run();
+
+    // Link the local reversing row to the real cloud void entry for
+    // traceability — best-effort, not load-bearing for anything else.
+    localDb
+      .update(localTransactions)
+      .set({ serverTransactionId: cloudResult.voidTransactionId } as any)
+      .where(eq(localTransactions.clientTxnId, voidClientTxnId))
       .run();
 
     return { clientTxnId, voidedAt: now, cloudVoided: true };
@@ -587,13 +693,17 @@ export async function voidLocalTransaction(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function syncLocalVoidsToNeon(eventId: number) {
+  // Note: this no longer filters on status="voided" — the original row's
+  // status stays "completed" under the additive void model (see
+  // voidLocalTransaction). voidSyncStatus is only ever set to "failed" when
+  // a void actually happened, so that alone is sufficient to find rows that
+  // still need their cloud void reconciled.
   const pending = localDb
     .select()
     .from(localTransactions)
     .where(
       and(
         eq(localTransactions.eventId, eventId),
-        eq(localTransactions.status, "voided"),
         eq(localTransactions.voidSyncStatus, "failed"),
         sql`${localTransactions.serverTransactionId} IS NOT NULL`
       )
@@ -604,7 +714,7 @@ export async function syncLocalVoidsToNeon(eventId: number) {
 
   for (const txn of pending) {
     try {
-      await voidTransaction(Number(txn.serverTransactionId), {
+      const cloudResult = await voidTransaction(Number(txn.serverTransactionId), {
         voidedBy: (txn as any).voidedBy ?? null,
         voidReason: (txn as any).voidReason ?? null,
       });
@@ -613,6 +723,14 @@ export async function syncLocalVoidsToNeon(eventId: number) {
         .update(localTransactions)
         .set({ voidSyncStatus: "synced", voidSyncError: null } as any)
         .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
+        .run();
+
+      // Link the local reversing row to the real cloud void entry, same as
+      // the happy path in voidLocalTransaction — best-effort traceability.
+      localDb
+        .update(localTransactions)
+        .set({ serverTransactionId: cloudResult.voidTransactionId } as any)
+        .where(eq(localTransactions.voidOfClientTxnId, txn.clientTxnId))
         .run();
 
       localDb
@@ -879,10 +997,20 @@ export function getLocalCashDrawerCounts(eventId: number) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function getLocalTransactionsByEvent(eventId: number) {
+  // Reversing (void) rows are a local-only bookkeeping mirror of the cloud
+  // ledger, not a sale the cashier ever rang up — exclude them from the
+  // history list they see/print/void from. buildLocalTransactionsExcel()
+  // queries local_transactions directly (not this function) so they still
+  // show up in the export, matching the cloud export's shape.
   return localDb
     .select()
     .from(localTransactions)
-    .where(eq(localTransactions.eventId, eventId))
+    .where(
+      and(
+        eq(localTransactions.eventId, eventId),
+        sql`${localTransactions.voidOfClientTxnId} IS NULL`
+      )
+    )
     .orderBy(sql`${localTransactions.createdAt} desc`)
     .all();
 }
@@ -924,6 +1052,19 @@ export async function getLocalTransactionItems(clientTxnId: string) {
 }
 
 export async function getUnsyncedLocalTransactions(eventId: number) {
+  // A sale that was voided before it ever got a chance to sync (e.g. rung up
+  // and voided entirely while offline) is still pushed here like any other
+  // pending sale — it does NOT get excluded. It used to be, on the theory
+  // that "nothing to reconcile" if the sale never reached the cloud, but that
+  // meant a sale-then-void done fully offline would silently never sync at
+  // all: no error, just permanently invisible to the cloud, which broke
+  // parity between the local POS export and the cloud events export (the
+  // local export always shows the pair; the cloud export showed nothing).
+  // Instead this sale syncs normally via createTransaction() below, and the
+  // "voided mid-sync" check right after picks up that it's already voided
+  // locally and immediately queues the matching cloud void — so a sale
+  // voided offline now reaches the cloud as a real sale + real void, in the
+  // same sync pass, exactly like any other void does.
   const txns = localDb
     .select()
     .from(localTransactions)
@@ -931,9 +1072,8 @@ export async function getUnsyncedLocalTransactions(eventId: number) {
       and(
         eq(localTransactions.eventId, eventId),
         inArray(localTransactions.syncStatus, ["pending", "failed"]),
-        // A local sale that was voided before it ever synced has nothing
-        // left to push — exclude it from the sync queue.
-        ne(localTransactions.status, "voided")
+        // Reversing rows are local-only bookkeeping, never a sale to push.
+        sql`${localTransactions.voidOfClientTxnId} IS NULL`
       )
     )
     .orderBy(localTransactions.createdAt)
@@ -1287,15 +1427,58 @@ export async function syncLocalTransactionsToNeon(eventId: number) {
         })),
       });
 
+      // This sale may already have been voided locally before this sync ever
+      // ran — most commonly a sale rung up AND voided entirely while offline
+      // (voidLocalTransaction() found serverTransactionId still null at void
+      // time and correctly concluded there was nothing in the cloud yet to
+      // void), but also possible as a narrow mid-flight race if the cashier
+      // catches the mistake in the moment this create() call is in flight.
+      // Either way, without this check the row would just be marked "synced"
+      // and left as a live, un-voided sale in the cloud forever with nothing
+      // to retry it — silently breaking parity with the local export, which
+      // always shows the sale+void pair. voidedAt is stamped on the original
+      // in the same atomic transaction as the reversing row, so it's the
+      // reliable "already voided, cloud void not yet reconciled" signal.
+      const latestLocal = localDb
+        .select({
+          voidedAt: localTransactions.voidedAt,
+          voidSyncStatus: localTransactions.voidSyncStatus,
+        })
+        .from(localTransactions)
+        .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
+        .limit(1)
+        .get();
+
+      const voidedMidSync =
+        latestLocal?.voidedAt != null && latestLocal?.voidSyncStatus == null;
+
       localDb
         .update(localTransactions)
         .set({
           syncStatus:          "synced",
           serverTransactionId: created.id,
           syncError:           null,
-        })
+          ...(voidedMidSync
+            ? {
+                voidSyncStatus: "failed",
+                voidSyncError:
+                  "Voided locally while this sale was still syncing — cloud void queued for retry.",
+              }
+            : {}),
+        } as any)
         .where(eq(localTransactions.clientTxnId, txn.clientTxnId))
         .run();
+
+      if (voidedMidSync) {
+        localDb
+          .insert(localSyncLogs)
+          .values({
+            eventId,
+            message: `Local transaction ${txn.clientTxnId} was voided while syncing — queued cloud void retry.`,
+            createdAt: nowIso(),
+          })
+          .run();
+      }
 
       const receiptSync =
         Number(txn.receiptPrintCount ?? 0) > 0
@@ -1409,12 +1592,18 @@ export async function getLocalEventStats(eventId: number) {
     todayTxnIds.includes(item.clientTxnId)
   );
 
+  // revenue/discount/itemsSold sum across ALL rows including reversing
+  // (void) entries on purpose — their negative amounts net a voided sale's
+  // totals out automatically, same as the cloud's getEventStats(). txnCount
+  // excludes reversing rows so a sale-then-void doesn't count as two
+  // transactions, mirroring the cloud's `filter (where voidOfTransactionId
+  // is null)`.
   return {
-    txnCount:       txns.length,
+    txnCount:       txns.filter((txn) => !(txn as any).voidOfClientTxnId).length,
     revenue:        txns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0),
     discount:       txns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0),
     itemsSold:      items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0),
-    todayTxnCount:  todayTxns.length,
+    todayTxnCount:  todayTxns.filter((txn) => !(txn as any).voidOfClientTxnId).length,
     todayRevenue:   todayTxns.reduce((sum, txn) => sum + Number(txn.finalAmount ?? 0), 0),
     todayDiscount:  todayTxns.reduce((sum, txn) => sum + Number(txn.discount ?? 0), 0),
     todayItemsSold: todayItems.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0),
@@ -1449,10 +1638,10 @@ export function getLocalPendingSyncCount(eventId: number) {
         eq(localTransactions.eventId, eventId),
         or(
           inArray(localTransactions.syncStatus, ["pending", "failed"]),
-          and(
-            eq(localTransactions.status, "voided"),
-            eq(localTransactions.voidSyncStatus, "failed")
-          )
+          // voidSyncStatus is only ever set once a void has actually
+          // happened, regardless of the original row's status, so this
+          // alone is enough to catch a cloud void still awaiting retry.
+          eq(localTransactions.voidSyncStatus, "failed")
         )
       )
     )

@@ -109,6 +109,13 @@ export const localTransactions = sqliteTable("local_transactions", {
   // "synced" = cloud void confirmed.
   voidSyncStatus: text("void_sync_status"),
   voidSyncError: text("void_sync_error"),
+
+  // Set ONLY on the reversing entry (mirrors the cloud's voidOfTransactionId):
+  // points back to the clientTxnId of the sale it reverses. The original sale
+  // row is never mutated/removed on void — status stays "completed" and a new
+  // negative row is inserted instead, so local exports/stats net out exactly
+  // like the cloud's transactions table does.
+  voidOfClientTxnId: text("void_of_client_txn_id"),
 });
 
 export const localTransactionItems = sqliteTable("local_transaction_items", {

@@ -93,6 +93,9 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_local_transactions_status
       ON local_transactions(status);
 
+    CREATE INDEX IF NOT EXISTS idx_local_transactions_void_of_client_txn_id
+      ON local_transactions(void_of_client_txn_id);
+
     CREATE INDEX IF NOT EXISTS idx_local_transaction_items_client_txn_id
       ON local_transaction_items(client_txn_id);
 
@@ -331,6 +334,12 @@ export function initLocalDb() {
     "local_transactions",
     "void_sync_error",
     `ALTER TABLE local_transactions ADD COLUMN void_sync_error TEXT`
+  );
+
+  addColumnIfMissing(
+    "local_transactions",
+    "void_of_client_txn_id",
+    `ALTER TABLE local_transactions ADD COLUMN void_of_client_txn_id TEXT`
   );
 
   addColumnIfMissing(

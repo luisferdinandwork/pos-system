@@ -246,14 +246,19 @@ export async function buildLocalTransactionsExcel(
   for (const txn of txns) {
     const lines     = linesByTxn.get(txn.clientTxnId) ?? [];
     const displayId = txn.displayId ?? txn.clientTxnId;
-    const isVoided  = txn.status === "voided";
+
+    // Same rule as buildTransactionExcel (cloud): only the reversing entry
+    // itself reads as "Voided" — an original that was later voided still
+    // shows "Completed" here since it's still a real sale row. This is what
+    // makes this export's shape match the "entire event" export exactly.
+    const isVoidEntry = (txn as any).voidOfClientTxnId != null;
 
     const baseTxnData = {
       date:         d(txn.createdAt),
       displayId,
       clientTxnId:  txn.clientTxnId,
       cashier:      txn.cashierName ?? "—",
-      status:       isVoided ? "Voided" : "Completed",
+      status:       isVoidEntry ? "Voided" : "Completed",
       syncStatus:   txn.syncStatus ?? "—",
       voidedBy:     txn.voidedBy ?? "—",
       voidReason:   txn.voidReason ?? "—",
@@ -271,7 +276,7 @@ export async function buildLocalTransactionsExcel(
         product: "(no items)", promo: "—",
         qty: 0, unitPrice: 0, discount: 0, finalPrice: 0, subtotal: 0,
       });
-      if (isVoided) styleVoidRow(row);
+      if (isVoidEntry) styleVoidRow(row);
       continue;
     }
 
@@ -290,7 +295,7 @@ export async function buildLocalTransactionsExcel(
         finalPrice:  n(line.finalPrice),
         subtotal:    n(line.subtotal),
       });
-      if (isVoided) styleVoidRow(row);
+      if (isVoidEntry) styleVoidRow(row);
     }
   }
 

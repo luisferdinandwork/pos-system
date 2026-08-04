@@ -412,7 +412,11 @@ function POSInner() {
     if (prepared) { setScreen("sell"); await refreshPendingCount(ev.id); }
   }
   async function refreshPendingCount(eventId: number) {
-    try { const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json()); setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed"||(t.status==="voided"&&t.voidSyncStatus==="failed")).length:0); } catch { setPendingSyncCount(0); }
+    // voidSyncStatus is only ever set once a void has actually happened
+    // (regardless of the original row's status, which stays "completed"
+    // under the additive void model) — so it alone is enough to catch a
+    // cloud void still awaiting retry. Matches getLocalPendingSyncCount().
+    try { const txns=await fetch(`/api/local/events/${eventId}/transactions`,{cache:"no-store"}).then(r=>r.json()); setPendingSyncCount(Array.isArray(txns)?txns.filter((t:any)=>t.syncStatus==="pending"||t.syncStatus==="failed"||t.voidSyncStatus==="failed").length:0); } catch { setPendingSyncCount(0); }
   }
 
   async function syncLocalTransactions(eventId: number) {
@@ -425,9 +429,20 @@ function POSInner() {
     syncingRef.current = true;
     setSyncing(true);
 
+    // Without a timeout, a connection that dies mid-request (flaky wifi
+    // dropping right as this fetch is in flight) can leave this fetch
+    // hanging indefinitely — since syncingRef only resets in `finally`,
+    // that silently wedges every future auto-sync until the page reloads.
+    // The API route already bounds its own DB work to ~30s (see
+    // lib/db/index.ts statement_timeout), so 35s here gives it room to
+    // respond normally before we give up client-side.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 35_000);
+
     try {
       const res = await fetch(`/api/local/events/${eventId}/sync`, {
         method: "POST",
+        signal: controller.signal,
       });
 
       const result = await res.json().catch(() => null);
@@ -481,11 +496,16 @@ function POSInner() {
 
       flash("No pending transactions to sync.");
     } catch (error) {
-      flash(
-        error instanceof Error ? error.message : "Sync failed.",
-        true
-      );
+      const message =
+        error instanceof Error
+          ? error.name === "AbortError"
+            ? "Sync timed out — will retry automatically."
+            : error.message
+          : "Sync failed.";
+
+      flash(message, true);
     } finally {
+      clearTimeout(timeoutId);
       syncingRef.current = false;
       setSyncing(false);
     }
